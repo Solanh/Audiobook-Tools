@@ -1,17 +1,11 @@
 import os
 import re
 
-
-
-
-
 # Specify the folder path
-directory = r"E:\Libby FIles\Patrick Rothfuss\The Kingkiller Chronicles\[01] The Name of the Wind"
+directory = r"C:\Users\Solan\OneDrive - Clark University\Clark\Personal Projects\Audiobook Tools\Warbreaker"
 
 # List all files in the directory
 filenames = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
-
-
 
 
 
@@ -22,36 +16,46 @@ word_to_number = {
     "Eighty": 80, "Ninety": 90, "Hundred": 100
 }
 
-def get_word_to_number(filename):
+def __main__():
+    
+    counter = 1
+    print("script running")
+    for filename in os.listdir(directory):
+        if filename.endswith(".mp3"):  # Assuming text files, change extension as needed
+            # Get the number for the filename
+            number = get_word_to_number(filename, counter)
+            counter += 1
+            
+            # Create a new filename with the number at the start
+            new_filename = f"{number}-{filename}"
+            
+            # Get full paths
+            old_file = os.path.join(directory, filename)
+            new_file = os.path.join(directory, new_filename)
+            
+            # Rename the file
+            os.rename(old_file, new_file)
+            print(f"Renamed: {old_file} -> {new_file}")
+    
+
+def get_word_to_number(filename, counter):
     words = re.split(r'[-\s.]', filename)
     total = 0
-    for word in words:
-        if word in word_to_number:
-            total += word_to_number[word]
+    other_counter = 0
+    
+    while counter < len(filenames):
+        for word in words:
+            if word in word_to_number and counter % 10 == 0:
+                total += word_to_number[word]
+                
+            elif word in word_to_number and other_counter < 2:
+                total += word_to_number[word]
+                other_counter += 1
+                
+                
     return total
 
-numbers = []
 
-for filename in filenames:
-    number = get_word_to_number(filename)
-    numbers.append(number)
-    print(f"{filename} -> {number}")
-    
-numbers.sort()
-print(numbers)
 
-for filename in os.listdir(directory):
-    if filename.endswith(".mp3"):  # Assuming text files, change extension as needed
-        # Get the number for the filename
-        number = get_word_to_number(filename)
-        
-        # Create a new filename with the number at the start
-        new_filename = f"{number}-{filename}"
-        
-        # Get full paths
-        old_file = os.path.join(directory, filename)
-        new_file = os.path.join(directory, new_filename)
-        
-        # Rename the file
-        os.rename(old_file, new_file)
-        print(f"Renamed: {old_file} -> {new_file}")
+if __name__ == "__main__":
+    __main__()

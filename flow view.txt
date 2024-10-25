@@ -1,0 +1,16 @@
+20 single  up to twenty
+9 double 21-29
+1 single 30
+9 double 31-39
+1 single 40
+9 double 41-49
+1 single 50
+9 double 51-59
+1 single 60
+9 double 61-69
+1 single 70
+9 double 71-79
+1 single 80
+9 double 81-89
+1 single 90
+9 double 91-99
