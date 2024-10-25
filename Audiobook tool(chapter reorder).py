@@ -19,35 +19,36 @@ word_to_number = {
     "Eighty": 80, "Ninety": 90, "Hundred": 100
 }
 
-def get_word_to_number(filename, counter):
-    words = re.split(r'[-\s.]', filename)
+def get_word_to_number(filename):
+    words = re.split(r'[-\s._]', filename)
     total = 0
-    other_counter = 0
+    count = 0  # Keeps track of words processed for current file
     
-    while counter < len(filenames):
-        for word in words:
-            if word in word_to_number and counter % 10 == 0:
-                total += word_to_number[word]
-                
-            elif word in word_to_number and other_counter < 2:
-                total += word_to_number[word]
-                other_counter += 1
-                
-    logging.debug(f"Processing file: {filename}")    
+    # Process based on specified intervals
+    for word in words:
+        if word in word_to_number:
+            total += word_to_number[word]
+            count += 1
+            
+            # Process only the first word if total is 20, 30, 40, etc.
+            if total not in [20, 30, 40, 50, 60, 70, 80, 90]:
+                break
+            # Process only two words if total is between the intervals needing doubles
+            elif count == 2:
+                break
+
+    logging.debug(f"Extracted number {total} from filename: {filename}")
     return total
-    
-    
 
 def __main__():
     logging.info("Starting the chapter reordering process.")
-    
     counter = 1
-    
-    for filename in os.listdir(directory):
-        if filename.endswith(".mp3"):  # Assuming text files, change extension as needed
+
+    for filename in filenames:
+        if filename.endswith(".mp3"):  # Assuming MP3 files, adjust extension as needed
             logging.debug(f"Found MP3 file: {filename}")
             # Get the number for the filename
-            number = get_word_to_number(filename, counter)
+            number = get_word_to_number(filename)
             logging.debug(f"Assigned number {number} to file: {filename}")
             counter += 1
             

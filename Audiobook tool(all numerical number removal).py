@@ -2,7 +2,7 @@ import os
 import re
 
 # Specify the folder path
-directory = r"E:\Libby FIles\Patrick Rothfuss\The Kingkiller Chronicles\[01] The Name of the Wind"
+directory = r"C:\Users\Solan\OneDrive - Clark University\Clark\Personal Projects\Audiobook Tools\Warbreaker"
 
 # List all files in the directory
 filenames = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
