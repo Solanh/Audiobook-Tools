@@ -14,3 +14,12 @@
 9 double 81-89
 1 single 90
 9 double 91-99
+
+
+
+
+if one then hundred 3-4
+
+if 10k then one 
+
+if 10k + 1
