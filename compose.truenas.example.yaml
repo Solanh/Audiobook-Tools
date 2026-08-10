@@ -15,13 +15,13 @@ x-media-janitor-common: &media-janitor-common
     interval: 30s
     timeout: 5s
     retries: 3
-  entrypoint: ["/bin/sh", "-c"]
-  command: ["trap 'exit 0' TERM INT; while :; do sleep 3600; done"]
 
 services:
   media-janitor:
     <<: *media-janitor-common
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["trap 'exit 0' TERM INT; while :; do sleep 3600; done"]
     volumes:
       # Replace these example host paths with your TrueNAS datasets.
       - /mnt/tank/media:/media:ro
@@ -31,6 +31,10 @@ services:
     <<: *media-janitor-common
     profiles: ["write"]
     restart: "no"
+    # Keep the image's media-janitor entrypoint so `docker compose run`
+    # receives apply/rollback arguments directly.
+    entrypoint: ["media-janitor"]
+    command: ["--help"]
     volumes:
       # The writer is intentionally a separate opt-in service.
       - /mnt/tank/media:/media:rw
