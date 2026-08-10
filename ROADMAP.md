@@ -130,7 +130,7 @@ Current apply refuses:
 - [x] Add unit coverage for scanning, parsing, apply, rollback, collision refusal, stale plans, and crash recovery.
 - [ ] Add synthetic fixture generator with intentionally ugly audiobook/movie/show trees.
 - [ ] Add structured logging.
-- [ ] Add CI that runs the test suite and validates the Docker build.
+- [x] Add CI that runs the test suite and validates the Docker build.
 
 ### Exit condition
 
