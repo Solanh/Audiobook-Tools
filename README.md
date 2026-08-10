@@ -17,9 +17,12 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map.
 - recursive audiobook/video inventory
 - directory, parent, sibling, and child context capture
 - JSON scan snapshots
+- read-only audiobook filename analysis
+- written chapter-number parsing and special-section hints
+- release-noise normalization with recorded transformations
 - explicit file-operation plans
 - automatically generated rollback operations for moves/renames
-- no filesystem mutations in the new scanner
+- no filesystem mutations in the new scanner/analyzer
 
 ## Development usage
 
@@ -29,6 +32,8 @@ Requires Python 3.11+.
 python -m pip install -e .
 media-janitor scan /path/to/media
 media-janitor scan /path/to/media --json snapshot.json --pretty
+media-janitor analyze-audiobooks /path/to/audiobooks
+media-janitor analyze-audiobooks /path/to/audiobooks --json analysis.json --pretty
 ```
 
 Run the tests with:
