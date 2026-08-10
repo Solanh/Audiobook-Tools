@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from media_janitor.executor import UnsafePlanError, apply_plan, rollback_journal, validate_plan
+from media_janitor.executor import (
+    UnsafePlanError,
+    _rename_noreplace,
+    apply_plan,
+    rollback_journal,
+    validate_plan,
+)
 from media_janitor.journal import JournalError, create_journal, load_journal, set_journal_status, set_operation_state
 from media_janitor.models import FileOperation, OperationKind, Plan
 
@@ -108,6 +114,20 @@ class ExecutorTests(unittest.TestCase):
             )
             with self.assertRaises(UnsafePlanError):
                 validate_plan(plan)
+
+    def test_atomic_rename_never_replaces_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.m4b"
+            destination = root / "destination.m4b"
+            source.write_bytes(b"source")
+            destination.write_bytes(b"destination")
+
+            with self.assertRaises(UnsafePlanError):
+                _rename_noreplace(source, destination)
+
+            self.assertEqual(source.read_bytes(), b"source")
+            self.assertEqual(destination.read_bytes(), b"destination")
 
     def test_existing_destination_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
