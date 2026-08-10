@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
+import sys
 
 try:
     import fcntl
@@ -35,6 +38,54 @@ class ConcurrentExecutionError(ExecutionError):
 
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
+
+
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+
+
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically rename without ever replacing an existing destination.
+
+    Filesystem apply is intentionally Linux-only for now because TrueNAS is
+    the target deployment and Linux exposes renameat2(RENAME_NOREPLACE).
+    Refuse to fall back to os.rename(), whose overwrite behavior would weaken
+    the collision guarantee under an external race.
+    """
+    if not sys.platform.startswith("linux"):
+        raise UnsafePlanError(
+            "Filesystem apply requires Linux renameat2(RENAME_NOREPLACE); "
+            "read-only commands remain portable"
+        )
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise UnsafePlanError(
+            "Linux renameat2(RENAME_NOREPLACE) is unavailable; refusing an unsafe rename fallback"
+        )
+
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise UnsafePlanError(f"Destination already exists; refusing to overwrite it: {destination}")
+    if error_number in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        raise UnsafePlanError(
+            "Atomic no-replace rename is unavailable on this kernel/filesystem; "
+            "refusing an unsafe rename fallback"
+        )
+    raise OSError(error_number, os.strerror(error_number), str(source))
 
 
 def _root_for_plan(plan: Plan) -> Path:
@@ -167,9 +218,7 @@ def _validate_preconditions(root: Path, operation: FileOperation, *, rollback: b
             operation.expected_source_mtime_ns is not None
             and source_stat.st_mtime_ns != operation.expected_source_mtime_ns
         ):
-            raise UnsafePlanError(
-                f"Source modification time changed since the plan was created: {source}"
-            )
+            raise UnsafePlanError(f"Source modification time changed since the plan was created: {source}")
         return
 
     if operation.kind is OperationKind.MKDIR:
@@ -197,7 +246,7 @@ def _perform(root: Path, operation: FileOperation, *, rollback: bool = False) ->
     if operation.kind in {OperationKind.MOVE, OperationKind.RENAME}:
         source = _resolve_relative(root, operation.source, "source")
         destination = _resolve_relative(root, operation.destination, "destination")
-        os.rename(source, destination)
+        _rename_noreplace(source, destination)
         return
 
     if operation.kind is OperationKind.MKDIR:
