@@ -80,7 +80,7 @@ def scan_library(root: str | Path, *, include_other: bool = False) -> ScanSnapsh
                 continue
 
             try:
-                size_bytes = file_path.stat().st_size
+                stat_result = file_path.stat()
             except OSError:
                 unreadable.append(relative_posix(file_path, root_path))
                 continue
@@ -89,9 +89,10 @@ def scan_library(root: str | Path, *, include_other: bool = False) -> ScanSnapsh
             entries.append(
                 FileEntry(
                     relative_path=relative_posix(file_path, root_path),
-                    size_bytes=size_bytes,
+                    size_bytes=stat_result.st_size,
                     extension=extension,
                     media_kind=media_kind,
+                    mtime_ns=stat_result.st_mtime_ns,
                 )
             )
 
