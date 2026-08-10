@@ -1,0 +1,37 @@
+name: media-janitor
+
+x-media-janitor-common: &media-janitor-common
+  image: media-janitor:local
+  user: "10001:10001"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=64m
+  healthcheck:
+    test: ["CMD", "media-janitor", "--help"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+  entrypoint: ["/bin/sh", "-c"]
+  command: ["trap 'exit 0' TERM INT; while :; do sleep 3600; done"]
+
+services:
+  media-janitor:
+    <<: *media-janitor-common
+    restart: unless-stopped
+    volumes:
+      # Replace these example host paths with your TrueNAS datasets.
+      - /mnt/tank/media:/media:ro
+      - /mnt/tank/apps/media-janitor:/state:rw
+
+  media-janitor-writer:
+    <<: *media-janitor-common
+    profiles: ["write"]
+    restart: "no"
+    volumes:
+      # The writer is intentionally a separate opt-in service.
+      - /mnt/tank/media:/media:rw
+      - /mnt/tank/apps/media-janitor:/state:rw
