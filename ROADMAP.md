@@ -1,153 +1,208 @@
 # Media Janitor Roadmap
 
-This repository is evolving from a pair of one-off audiobook renaming scripts into a personal, self-hosted media cleanup toolkit for a TrueNAS library. Audiobooks remain the first target, with Jellyfin movie/TV cleanup sharing the same scan, context, planning, review, and filesystem-operation core.
+This repository is evolving from two one-off audiobook renaming scripts into a personal, self-hosted media cleanup toolkit for a TrueNAS library. Audiobooks remain the first target, with Jellyfin movie/TV cleanup sharing the same scan, context, planning, review, and reversible filesystem-operation core.
 
 ## Primary goal
 
-Point the tool at a messy media dataset, let it understand the surrounding directory context, propose a clean canonical structure and metadata, review uncertain cases, and then apply only approved changes with a rollback manifest.
+Point the tool at a messy media dataset, let it understand the surrounding directory context, propose a clean canonical structure and metadata, review uncertain cases, and apply only approved changes with a durable rollback journal.
 
-The local LLM is a context interpreter, not an authority. It may parse names and rank candidates, but it never directly mutates files or server metadata.
+The local LLM is a context interpreter, not an authority. It may parse names, infer grouping, and rank candidates, but it never directly mutates files or server metadata.
 
 ## Core workflow
 
 ```text
 SCAN (read only)
   -> SNAPSHOT
-  -> ANALYZE (rules + server metadata + local LLM context)
+  -> ANALYZE (rules + tags + server metadata + optional local LLM)
   -> IDENTIFY (provider candidates + evidence)
-  -> PLAN (explicit operations)
+  -> PLAN (explicit reversible operations + source fingerprints)
   -> REVIEW
   -> SNAPSHOT/BACKUP CHECK
-  -> APPLY
+  -> APPLY (durable journal)
   -> VERIFY
   -> RESCAN AUDIOBOOKSHELF/JELLYFIN
+       \
+        -> ROLLBACK from journal if needed
 ```
 
 ## Architecture map
 
 ```text
 media_janitor/
-  core/
-    scanner          filesystem inventory and directory context
-    models           immutable snapshots, candidates, plans, operations
-    rules            deterministic cleanup/parsing rules
-    scorer           evidence and confidence calculation
-    executor         approved filesystem operations only
-    audit            manifests and operation history
+  scanner.py          filesystem inventory and directory context
+  models.py           snapshots, versioned plans, reversible operations
+  audiobook.py        deterministic audiobook filename/chapter parsing
+  journal.py          durable atomic apply/rollback journal
+  executor.py         guarded filesystem apply + rollback
+  cli.py              scan/analyze/validate/apply/rollback commands
 
-  adapters/
-    audiobookshelf   current metadata, provider search, approved updates, rescan
-    jellyfin         current identity/metadata, refresh integration
+  adapters/           planned
+    audiobookshelf    current metadata, provider search, approved updates, rescan
+    jellyfin          identity/metadata, refresh integration
 
-  media/
-    audiobooks       title/author/series/narrator/sequence logic
-    movies           title/year/provider-id logic
-    shows            series/season/episode logic
+  llm/                planned
+    ollama             local structured context interpretation
+    schemas            strict validated output
 
-  llm/
-    ollama           local structured-output context interpretation
-    prompts          bounded directory-context prompts
-    schemas          strict validated responses
-
-  web/
-    review queue     current vs proposed state, evidence, approve/edit/reject
-
-  cli/
-    scan/plan/apply/verify commands for administration and debugging
+  web/                planned
+    review queue       current vs proposed state, evidence, approve/edit/reject
 ```
 
-The initial implementation may keep modules flatter than this map until the code is large enough to justify subpackages.
+The implementation can stay relatively flat until these pieces become large enough to justify deeper subpackages.
 
-## Data model
+## Safety invariants
 
-Every cleanup should be explainable and reversible. The durable concepts are:
+These are architectural requirements, not optional polish:
 
-- `ScanSnapshot`: immutable observation of the filesystem/server state.
-- `DirectoryContext`: parent, siblings, child directories, and filenames for contextual inference.
-- `ParsedIdentity`: what rules/LLM think the item name contains.
-- `Candidate`: a possible real-world audiobook/movie/show identity from a provider.
-- `Evidence`: title, author, narrator, duration, year, series, provider ID, etc.
-- `Proposal`: desired canonical metadata and path plus confidence.
-- `FileOperation`: one mkdir/move/rename/metadata write.
-- `Plan`: ordered operations plus automatically generated rollback operations.
-- `Decision`: approve/edit/reject/ignore.
-- `AuditEvent`: what changed, when, and why.
+1. Scanning and analysis never mutate media.
+2. A model/provider response never directly becomes a filesystem operation.
+3. Every write comes from an explicit versioned plan.
+4. Plans used for filesystem apply must be fully reversible.
+5. The rollback journal is persisted outside the media root before the first write.
+6. Journal updates are written atomically and fsynced.
+7. Interrupted `applying`/`rolling_back` states must be reconcilable from filesystem state or stop for manual review.
+8. Existing destinations are never overwritten.
+9. Absolute paths and paths escaping the configured media root are rejected.
+10. Cross-filesystem moves remain disabled until a copy/verify/delete transaction exists.
+11. Source size/mtime fingerprints can be carried into plans so stale files are rejected at apply time.
+12. Concurrent apply/rollback operations sharing the same state directory are locked out.
+13. Audiobookshelf/Jellyfin databases are never edited directly.
+14. Metadata embedding, deletion, and other destructive operations remain disabled until they have explicit rollback semantics.
 
-## Confidence model
+A TrueNAS/ZFS snapshot before a large apply remains the second recovery layer above the application-level journal.
 
-Do not collapse every decision into a single opaque score. Keep at least:
+## Durable rollback design
 
-- parsing confidence: did we understand the messy input?
-- identity confidence: did we identify the correct work?
-- edition confidence: for audiobooks, is this the correct recording/narrator/edition?
-- operation confidence: is this specific rename/move safe?
+The filesystem executor now uses a journal-first state machine:
 
-Auto-apply remains disabled until the manual workflow proves reliable.
+```text
+journal_created
+  -> applying
+      operation: pending -> applying -> applied
+      operation: pending -> applying -> applied
+      ...
+  -> completed
+```
 
-## Phase 0 - Foundation (in progress)
+Rollback processes completed operations in reverse order:
+
+```text
+applied -> rolling_back -> rolled_back
+```
+
+If the process/container dies after an atomic rename but before `applied` is persisted, the journal still contains `applying`. Rollback compares source and destination paths to determine whether the rename happened. Ambiguous states stop rather than guessing.
+
+The journal embeds the original plan plus a SHA-256 integrity digest. A modified/corrupt plan payload is rejected during journal loading.
+
+Currently enabled writes are deliberately limited to:
+
+- same-filesystem move/rename;
+- directory creation, reversed by empty-directory removal.
+
+Current apply refuses:
+
+- overwrite collisions;
+- symlink sources;
+- path traversal/root escapes;
+- stale source fingerprints when the plan supplies them;
+- cross-filesystem moves;
+- generic metadata writes;
+- any operation without a rollback definition.
+
+## Phase 0 - Foundation and safety
 
 - [x] Preserve legacy scripts rather than silently changing their behavior.
 - [x] Add installable Python package and CLI entrypoint.
 - [x] Add read-only recursive scanner for audio/video libraries.
 - [x] Capture parent/sibling/child directory context for later LLM use.
+- [x] Add schema/version markers for scan snapshots and plans.
+- [x] Capture source size and modification time in scan snapshots.
 - [x] Add explicit operation/plan models with reverse-order rollback generation.
-- [x] Add basic unit tests for scanning/classification/rollback.
-- [ ] Add JSON schema/version marker for scan snapshots and plans.
-- [ ] Add fixture generator with intentionally ugly audiobook/movie/show names.
+- [x] Add durable atomic journal storage outside the media root.
+- [x] Add guarded filesystem executor for reversible operations.
+- [x] Add crash reconciliation for interrupted renames/moves.
+- [x] Add journal plan-integrity checking.
+- [x] Add collision, root-escape, symlink, stale-source, cross-filesystem, and concurrency protections.
+- [x] Add `validate-plan`, `apply-plan`, `journal-status`, and `rollback` commands.
+- [x] Add Dockerfile.
+- [x] Add read-only-by-default TrueNAS Compose example with opt-in writer service.
+- [x] Document TrueNAS deployment and rollback workflow.
+- [x] Add unit coverage for scanning, parsing, apply, rollback, collision refusal, stale plans, and crash recovery.
+- [ ] Add synthetic fixture generator with intentionally ugly audiobook/movie/show trees.
 - [ ] Add structured logging.
+- [ ] Add CI that runs the test suite and validates the Docker build.
 
 ### Exit condition
 
-`media-janitor scan /path/to/library --json snapshot.json` can inventory a mounted TrueNAS dataset without modifying it and produces enough context for the next analysis layer.
+The core can safely observe a library and has a proven transaction boundary for future generated plans. No identity engine is required for this phase to be complete.
 
 ## Phase 1 - Audiobook analysis
 
 - [ ] Read embedded tags from M4B/MP3/FLAC without mutating files.
 - [ ] Detect audiobook item boundaries from folders and tracks.
-- [ ] Port useful chapter-number parsing from the legacy script into tested functions.
-- [ ] Normalize common release noise, separators, casing, bracketed tags, codec/bitrate text, disc/chapter labels, and site suffixes.
+- [x] Port useful written chapter-number parsing from the legacy script into tested functions.
+- [x] Begin deterministic release-noise normalization while preserving transformation evidence.
+- [ ] Expand normalization for separators, casing, bracketed tags, disc markers, release groups, and site suffixes.
 - [ ] Extract title, author, narrator, series, sequence, ISBN, and ASIN when present.
-- [ ] Preserve every transformation as evidence instead of discarding source text.
-- [ ] Produce a read-only analysis report showing clean, suspicious, and unresolved items.
+- [ ] Infer likely title/author/series from directory hierarchy.
+- [ ] Flag suspicious multi-book folders and split-book layouts.
+- [ ] Produce an item-level read-only analysis report, not just file-level filename hints.
+- [ ] Generate intentionally messy test fixtures for common audiobook layouts.
 
 ### Exit condition
 
-A scan of the real audiobook dataset produces useful proposed identities before any network lookup or LLM call.
+A scan of the real audiobook dataset produces useful item-level proposed identities before any provider lookup or LLM call.
 
 ## Phase 2 - Audiobookshelf adapter and identification
 
 - [ ] Configure Audiobookshelf base URL and API token through environment/file secrets.
 - [ ] Import existing library item metadata and paths.
-- [ ] Use Audiobookshelf provider/matching APIs rather than direct database edits.
+- [ ] Use Audiobookshelf APIs rather than direct database edits.
+- [ ] Search Audiobookshelf-supported metadata providers.
 - [ ] Normalize provider results into a common candidate model.
-- [ ] Rank candidates using identifiers, title, author, series, narrator, duration, and language.
+- [ ] Rank candidates using identifiers, title, author, series, narrator, duration, language, and existing folder context.
 - [ ] Cache provider queries and add retry/rate-limit handling.
-- [ ] Record the evidence contributing to each score.
-
-Current Audiobookshelf APIs expose library item retrieval, matching, batch quick-match, library scan, and approved item media updates, so the first adapter should use those APIs rather than writing its database directly.
+- [ ] Record evidence contributing to each score.
+- [ ] Keep parsing confidence, identity confidence, edition confidence, and operation confidence separate.
 
 ### Exit condition
 
-Most audiobooks have a ranked candidate list with understandable evidence and no changes have been written automatically.
+Most audiobooks have a ranked candidate list with understandable evidence and no automatic mutation.
 
-## Phase 3 - Review, apply, audit, and rollback
+## Phase 3 - Proposal generation and review
 
 - [ ] Add SQLite state for snapshots, proposals, decisions, and audit events.
+- [ ] Convert approved identity proposals into explicit filesystem/metadata plans.
+- [ ] Populate source size/mtime fingerprints on generated filesystem operations.
 - [ ] Build a small local web review queue.
-- [ ] Show current vs proposed metadata/path and the strongest evidence.
+- [ ] Show current vs proposed metadata/path and strongest evidence.
 - [ ] Approve/edit/reject/ignore individual proposals.
-- [ ] Batch-approve filtered high-confidence items manually.
-- [ ] Generate a filesystem operation manifest before writes.
-- [ ] Detect destination collisions, case-only renames, cross-filesystem moves, and missing sources.
-- [ ] Create reverse rollback operations automatically.
-- [ ] Apply approved Audiobookshelf metadata through the API.
-- [ ] Verify post-write state and report partial failures.
+- [ ] Batch-approve filtered high-confidence proposals manually.
+- [ ] Detect case-only renames and generate a safe temporary-hop sequence where required.
+- [ ] Verify post-apply state and report partial failures.
+- [ ] Add a pre-apply reminder/check for a recent TrueNAS snapshot.
 
 ### Exit condition
 
-An audiobook cleanup can be reviewed and applied safely end to end, with a manifest that can undo renames/moves.
+A real audiobook cleanup can be generated, reviewed, applied through the existing journaled executor, verified, and rolled back.
 
-## Phase 4 - Local LLM context engine
+## Phase 4 - Reversible server metadata updates
+
+Filesystem rollback is implemented first because metadata rollback needs a different transaction model.
+
+- [ ] Snapshot current Audiobookshelf metadata before every approved metadata update.
+- [ ] Represent server metadata updates separately from filesystem operations.
+- [ ] Persist before/after metadata in the durable journal/state database.
+- [ ] Apply approved metadata through the Audiobookshelf API only.
+- [ ] Implement metadata rollback using the captured previous values.
+- [ ] Make mixed filesystem + server transactions report partial completion precisely.
+- [ ] Trigger Audiobookshelf scans only when necessary.
+
+### Exit condition
+
+Metadata changes are as reversible and auditable as filesystem changes.
+
+## Phase 5 - Local LLM context engine
 
 - [ ] Add an Ollama-compatible adapter.
 - [ ] Send bounded context: parent, siblings, filenames, embedded tags, file counts/durations, current server metadata, and candidate summaries.
@@ -155,42 +210,53 @@ An audiobook cleanup can be reviewed and applied safely end to end, with a manif
 - [ ] Use the model for messy-name parsing, grouping hints, franchise/series context, and ambiguous candidate ranking.
 - [ ] Never treat the model itself as identity evidence.
 - [ ] Never expose filesystem or metadata mutation tools to the model.
-- [ ] Log prompt inputs/outputs with secrets and sensitive paths redacted where appropriate.
+- [ ] Log prompt inputs/outputs with secrets redacted.
+- [ ] Make Ollama completely optional.
 
 ### Exit condition
 
-Directories that deterministic rules cannot understand become materially easier to identify, while disabling Ollama still leaves a functional cleanup tool.
+Directories deterministic rules cannot understand become materially easier to identify, while disabling Ollama still leaves a functional cleanup tool.
 
-## Phase 5 - Jellyfin movies and TV
+## Phase 6 - Jellyfin movies and TV
 
 - [ ] Add Jellyfin server adapter and library inventory.
 - [ ] Detect movie vs show/season/episode structures.
-- [ ] Normalize movies toward `Movie Name (year) [provider-id]/Movie Name (year) [provider-id].ext` when the identity is verified.
+- [ ] Normalize movies toward `Movie Name (year) [provider-id]/Movie Name (year) [provider-id].ext` when identity is verified.
 - [ ] Normalize shows toward `Series Name (year) [provider-id]/Season 01/Series Name S01E01.ext`.
 - [ ] Preserve subtitles, extras, alternate versions, and multi-part media.
 - [ ] Use Jellyfin/provider metadata as evidence before renaming.
+- [ ] Reuse the existing journaled filesystem executor rather than adding a Jellyfin-specific writer.
 - [ ] Trigger targeted Jellyfin refreshes after approved changes.
-- [ ] Optionally write verified local NFO metadata later; do not do this by default because Jellyfin gives local NFO metadata priority.
+- [ ] Optionally write verified local NFO metadata later, with captured previous content for rollback.
 
 ### Exit condition
 
-The same review/apply engine can safely clean obvious movie and TV naming/structure problems without confusing versions, extras, or subtitles.
+The same review/apply engine safely fixes obvious movie and TV naming/structure problems without confusing versions, extras, or subtitles.
 
-## Phase 6 - TrueNAS deployment
+## Phase 7 - TrueNAS packaging and operation
 
-- [ ] Add Dockerfile and Compose example.
-- [ ] Default media mounts to read-only for scan/analyze services.
-- [ ] Make write access an explicit deployment choice for apply operations.
-- [ ] Persist SQLite/config/audit state separately from media.
-- [ ] Add `/health` and structured container logs.
-- [ ] Document TrueNAS Custom App/Compose setup and dataset permissions.
-- [ ] Add a pre-apply reminder/check for a recent TrueNAS snapshot.
+The initial container shape is already present; this phase makes it convenient for long-term use.
+
+- [x] Add Dockerfile.
+- [x] Add TrueNAS/Docker Compose example.
+- [x] Default normal media mount to read-only.
+- [x] Separate write-capable service behind an explicit Compose profile.
+- [x] Persist journal/state separately from media.
+- [x] Run the image as a non-root user by default.
+- [x] Drop container capabilities and enable `no-new-privileges` in the example deployment.
+- [x] Add a basic container health check.
+- [x] Document dataset permissions and deployment flow.
+- [ ] Publish versioned container images to GHCR so TrueNAS can pull without a local build.
+- [ ] Persist SQLite/config alongside journals in `/state`.
+- [ ] Add web-service `/health` once the review UI exists.
+- [ ] Add structured container logs.
+- [ ] Optionally integrate TrueNAS API snapshot verification/creation before apply.
 
 ### Exit condition
 
-The tool can live next to Audiobookshelf/Jellyfin on TrueNAS and be used without a development checkout.
+The tool can be installed, upgraded, scanned, reviewed, applied, and rolled back on TrueNAS without a development checkout.
 
-## Phase 7 - Quality-of-life automation
+## Phase 8 - Quality-of-life automation
 
 Only after the manual workflow is trusted:
 
@@ -198,31 +264,20 @@ Only after the manual workflow is trusted:
 - [ ] Notifications when new messy/unidentified media appears.
 - [ ] Reusable ignore/rule overrides for known weird libraries.
 - [ ] Optional confidence-gated auto-approval for truly unambiguous metadata-only changes.
-- [ ] Embedded audiobook metadata writes as a separate high-risk operation.
-- [ ] Snapshot-aware automatic rollback helper.
+- [ ] Embedded audiobook metadata writes as a separate high-risk transaction type.
+- [ ] Snapshot-aware rollback helper.
 
 ## Near-term implementation order
 
-1. Finish the scan snapshot format and synthetic fixtures.
+1. Add synthetic messy audiobook fixtures.
 2. Add read-only embedded tag extraction.
-3. Build deterministic audiobook filename/folder parsing.
-4. Add `analyze` and `plan` CLI commands with no writes.
-5. Add Audiobookshelf read/search integration.
-6. Add SQLite proposal state and the review UI.
-7. Add approved metadata/filesystem apply path.
-8. Add Ollama context assistance.
-9. Add Jellyfin movie/TV adapter using the proven core.
-10. Package for TrueNAS.
-
-## Safety invariants
-
-These should stay true even as the project grows:
-
-1. Scanning and analysis never mutate media.
-2. A model/provider response never directly becomes a filesystem operation.
-3. Every write comes from an explicit plan.
-4. Every move/rename checks for destination collisions immediately before execution.
-5. Original observed metadata/path is retained.
-6. Filesystem plans include rollback operations where reversal is possible.
-7. Audiobookshelf/Jellyfin databases are never edited directly.
-8. Destructive or metadata-embedding operations remain opt-in and separate from normal cleanup.
+3. Build folder/item-level audiobook grouping and identity parsing.
+4. Add Audiobookshelf read/search adapter.
+5. Add candidate/evidence scoring.
+6. Add SQLite proposal state.
+7. Generate real reviewed plans with source fingerprints.
+8. Build the review UI.
+9. Add reversible Audiobookshelf metadata transactions.
+10. Add Ollama context assistance.
+11. Add Jellyfin movie/TV adapter using the proven core.
+12. Publish a versioned container image for easy TrueNAS deployment.
