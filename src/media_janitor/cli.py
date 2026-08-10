@@ -7,14 +7,16 @@ from pathlib import Path
 from typing import Sequence
 
 from .audiobook import extract_chapter_hint, normalize_search_text
-from .models import MediaKind
+from .executor import ExecutionError, apply_plan, rollback_journal, validate_plan
+from .journal import JournalError, load_journal
+from .models import MediaKind, Plan
 from .scanner import scan_library
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="media-janitor",
-        description="Inspect a messy media library without modifying it.",
+        description="Inspect, plan, and safely apply reversible media-library cleanup operations.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -38,7 +40,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of interesting filename analyses to print (default: 20)",
     )
 
+    validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
+    validate.add_argument("plan", type=Path, help="Plan JSON file")
+
+    apply = subparsers.add_parser("apply-plan", help="Apply a fully reversible plan and persist a crash-safe journal")
+    apply.add_argument("plan", type=Path, help="Plan JSON file")
+    apply.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path("/state"),
+        help="Persistent state directory outside the media root (default: /state)",
+    )
+    apply.add_argument(
+        "--confirm-apply",
+        action="store_true",
+        help="Required acknowledgement that the reviewed plan should modify the media filesystem",
+    )
+
+    rollback = subparsers.add_parser("rollback", help="Reverse all completed operations recorded in a journal")
+    rollback.add_argument("journal", type=Path, help="Journal JSON created by apply-plan")
+    rollback.add_argument(
+        "--confirm-rollback",
+        action="store_true",
+        help="Required acknowledgement that rollback should modify the media filesystem",
+    )
+
+    status = subparsers.add_parser("journal-status", help="Show apply/rollback state from a durable journal")
+    status.add_argument("journal", type=Path, help="Journal JSON created by apply-plan")
+
     return parser
+
+
+def _load_plan(path: Path) -> Plan:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Plan is not valid JSON: {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"Plan JSON must be an object: {path}")
+    return Plan.from_dict(payload)
 
 
 def run_scan(args: argparse.Namespace) -> int:
@@ -46,6 +86,8 @@ def run_scan(args: argparse.Namespace) -> int:
     counts = Counter(entry.media_kind.value for entry in snapshot.files)
 
     summary = {
+        "schema_version": snapshot.schema_version,
+        "created_at": snapshot.created_at,
         "root": snapshot.root,
         "files": len(snapshot.files),
         "directories": len(snapshot.directories),
@@ -77,6 +119,8 @@ def run_audiobook_analysis(args: argparse.Namespace) -> int:
         records.append(
             {
                 "path": entry.relative_path,
+                "size_bytes": entry.size_bytes,
+                "mtime_ns": entry.mtime_ns,
                 "normalized_name": normalized.normalized,
                 "transformations": list(normalized.transformations),
                 "chapter_hint": chapter.to_dict() if chapter else None,
@@ -108,6 +152,8 @@ def run_audiobook_analysis(args: argparse.Namespace) -> int:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
         indent = 2 if args.pretty else None
         payload = {
+            "schema_version": snapshot.schema_version,
+            "created_at": snapshot.created_at,
             "root": snapshot.root,
             "records": records,
             "unreadable_paths": list(snapshot.unreadable_paths),
@@ -118,14 +164,75 @@ def run_audiobook_analysis(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_validate_plan(args: argparse.Namespace) -> int:
+    plan = _load_plan(args.plan)
+    validate_plan(plan)
+    print(
+        json.dumps(
+            {
+                "plan_id": plan.plan_id,
+                "root": plan.root,
+                "operations": len(plan.operations),
+                "reversible": plan.reversible,
+                "status": "valid",
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def run_apply_plan(args: argparse.Namespace) -> int:
+    plan = _load_plan(args.plan)
+    state_dir = args.state_dir.expanduser().resolve()
+    journal_path = state_dir / "journals" / f"{plan.plan_id}.json"
+    journal = apply_plan(plan, journal_path, confirmed=args.confirm_apply)
+    print(json.dumps({"status": journal["status"], "journal": str(journal_path)}, indent=2))
+    return 0
+
+
+def run_rollback(args: argparse.Namespace) -> int:
+    journal = rollback_journal(args.journal, confirmed=args.confirm_rollback)
+    print(json.dumps({"status": journal["status"], "journal": str(args.journal)}, indent=2))
+    return 0
+
+
+def run_journal_status(args: argparse.Namespace) -> int:
+    journal = load_journal(args.journal)
+    counts = Counter(str(record.get("state")) for record in journal["operations"])
+    print(
+        json.dumps(
+            {
+                "status": journal["status"],
+                "plan_id": journal["plan"].get("plan_id"),
+                "operation_states": dict(sorted(counts.items())),
+                "updated_at": journal.get("updated_at"),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "scan":
-        return run_scan(args)
-    if args.command == "analyze-audiobooks":
-        return run_audiobook_analysis(args)
+    try:
+        if args.command == "scan":
+            return run_scan(args)
+        if args.command == "analyze-audiobooks":
+            return run_audiobook_analysis(args)
+        if args.command == "validate-plan":
+            return run_validate_plan(args)
+        if args.command == "apply-plan":
+            return run_apply_plan(args)
+        if args.command == "rollback":
+            return run_rollback(args)
+        if args.command == "journal-status":
+            return run_journal_status(args)
+    except (ExecutionError, JournalError, OSError, ValueError) as error:
+        parser.exit(1, f"error: {error}\n")
 
     parser.error(f"Unknown command: {args.command}")
     return 2
