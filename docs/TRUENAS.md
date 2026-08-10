@@ -51,11 +51,11 @@ docker compose -f compose.truenas.example.yaml exec media-janitor \
   media-janitor validate-plan /state/plans/example.json
 ```
 
-Then invoke the opt-in writer profile:
+Then invoke the opt-in writer profile. The writer service uses `media-janitor` as its entrypoint, so pass the CLI subcommand directly:
 
 ```bash
 docker compose -f compose.truenas.example.yaml --profile write run --rm media-janitor-writer \
-  media-janitor apply-plan /state/plans/example.json \
+  apply-plan /state/plans/example.json \
   --state-dir /state \
   --confirm-apply
 ```
@@ -66,7 +66,7 @@ Current filesystem apply intentionally rejects:
 
 - overwrite of an existing destination;
 - absolute paths or paths that escape `/media`;
-- symlink sources;
+- symlink sources or symlinked path components;
 - cross-filesystem moves;
 - operations without a defined rollback;
 - concurrent apply/rollback processes using the same state directory.
@@ -86,7 +86,7 @@ Then use the writer profile to reverse only operations recorded as completed:
 
 ```bash
 docker compose -f compose.truenas.example.yaml --profile write run --rm media-janitor-writer \
-  media-janitor rollback /state/journals/PLAN_ID.json \
+  rollback /state/journals/PLAN_ID.json \
   --confirm-rollback
 ```
 
