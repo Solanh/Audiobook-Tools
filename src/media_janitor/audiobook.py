@@ -21,7 +21,11 @@ class ChapterHint:
     matched_text: str
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "kind": self.kind.value,
+            "number": self.number,
+            "matched_text": self.matched_text,
+        }
 
 
 @dataclass(frozen=True, slots=True)
