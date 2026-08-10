@@ -25,6 +25,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map and [docs/TRUENAS.md](do
 - durable crash-safe apply journals written outside the media root
 - reverse-order rollback for completed moves/renames/directories
 - crash reconciliation if a rename completed before its journal state was persisted
+- atomic Linux no-replace renames so a late destination race cannot overwrite media
 - collision, path-escape, symlink, stale-source, and cross-filesystem protections
 - irreversible metadata writes refused by the current executor
 - Dockerfile plus a TrueNAS Compose example
@@ -63,7 +64,9 @@ media-janitor rollback /state/journals/PLAN_ID.json \
   --confirm-rollback
 ```
 
-The current executor intentionally supports only operations with a defined rollback. Same-filesystem rename/move and directory creation are enabled; metadata writes, overwrite behavior, cross-filesystem copy/delete, and other destructive operations remain disabled until they have an equally strong recovery design.
+The current write executor targets Linux/TrueNAS so it can require `renameat2(RENAME_NOREPLACE)` rather than fall back to an overwrite-capable rename. Read-only scan/analyze commands remain portable.
+
+The executor intentionally supports only operations with a defined rollback. Same-filesystem rename/move and directory creation are enabled; metadata writes, cross-filesystem copy/delete, and other destructive operations remain disabled until they have an equally strong recovery design.
 
 Run the tests with:
 
