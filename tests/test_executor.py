@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from media_janitor.executor import UnsafePlanError, apply_plan, rollback_journal, validate_plan
-from media_janitor.journal import create_journal, load_journal, set_journal_status, set_operation_state
+from media_janitor.journal import JournalError, create_journal, load_journal, set_journal_status, set_operation_state
 from media_janitor.models import FileOperation, OperationKind, Plan
 
 
@@ -130,6 +131,27 @@ class ExecutorTests(unittest.TestCase):
             self.assertEqual((root / "before.m4b").read_bytes(), b"before")
             self.assertEqual((root / "after.m4b").read_bytes(), b"after")
             self.assertEqual(load_journal(journal_path)["status"], "failed")
+
+    def test_journal_detects_plan_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = base / "media"
+            state = base / "state"
+            root.mkdir()
+            state.mkdir()
+            (root / "book.m4b").write_bytes(b"book")
+            plan = Plan(
+                root=str(root),
+                operations=(FileOperation(kind=OperationKind.RENAME, source="book.m4b", destination="Book.m4b"),),
+            )
+            journal_path = state / "journal.json"
+            create_journal(plan, journal_path)
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            payload["plan"]["operations"][0]["destination"] = "tampered.m4b"
+            journal_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaises(JournalError):
+                load_journal(journal_path)
 
     def test_stale_plan_refuses_changed_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
