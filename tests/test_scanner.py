@@ -34,6 +34,8 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("Brandon Sanderson/Warbreaker/Chapter Thirty-One.mp3", paths)
             self.assertIn("TV/DS9 Complete/DS9.1x01.Emissary.mkv", paths)
             self.assertNotIn("Brandon Sanderson/Warbreaker/cover.jpg", paths)
+            self.assertEqual(snapshot.schema_version, 1)
+            self.assertTrue(all(entry.mtime_ns is not None for entry in snapshot.files))
 
             contexts = {context.relative_path: context for context in snapshot.directories}
             self.assertIn("Mistborn", contexts["Brandon Sanderson/Warbreaker"].sibling_names)
@@ -68,6 +70,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(rollback[0].destination, "tv/DS9.1x01.mkv")
         self.assertEqual(rollback[1].source, "Author/Book/Book.m4b")
         self.assertEqual(rollback[1].destination, "messy/book.m4b")
+        self.assertTrue(plan.reversible)
 
 
 if __name__ == "__main__":
