@@ -52,12 +52,31 @@ def _resolve_relative(root: Path, value: str | None, label: str) -> Path:
     raw = Path(value)
     if raw.is_absolute():
         raise UnsafePlanError(f"{label} must be relative to the plan root: {value}")
-    candidate = (root / raw).resolve(strict=False)
+    if ".." in raw.parts:
+        raise UnsafePlanError(f"{label} may not contain '..': {value}")
+
+    # Resolve the parent to catch symlink/path escapes, but preserve the leaf
+    # itself so a symlink source can be detected and refused instead of
+    # accidentally renaming its target.
+    lexical = root / raw
+    resolved_parent = lexical.parent.resolve(strict=False)
     try:
-        candidate.relative_to(root)
+        resolved_parent.relative_to(root)
     except ValueError as error:
         raise UnsafePlanError(f"{label} escapes the plan root: {value}") from error
-    return candidate
+    return resolved_parent / lexical.name
+
+
+def _reject_symlink_components(root: Path, value: str | None, label: str, *, include_leaf: bool) -> None:
+    if not value:
+        raise UnsafePlanError(f"Operation is missing {label}")
+    raw = Path(value)
+    parts = raw.parts if include_leaf else raw.parts[:-1]
+    current = root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise UnsafePlanError(f"{label} traverses a symlink; refusing ambiguous filesystem writes: {value}")
 
 
 def _journal_must_be_outside_root(root: Path, journal_path: Path) -> None:
@@ -115,11 +134,11 @@ def _validate_preconditions(root: Path, operation: FileOperation, *, rollback: b
     if operation.kind in {OperationKind.MOVE, OperationKind.RENAME}:
         source = _resolve_relative(root, operation.source, "source")
         destination = _resolve_relative(root, operation.destination, "destination")
+        _reject_symlink_components(root, operation.source, "source", include_leaf=True)
+        _reject_symlink_components(root, operation.destination, "destination", include_leaf=False)
 
         if not _lexists(source):
             raise UnsafePlanError(f"Source no longer exists: {source}")
-        if source.is_symlink():
-            raise UnsafePlanError(f"Refusing to move a symlink as a media operation: {source}")
         if _lexists(destination):
             raise UnsafePlanError(f"Destination already exists; refusing to overwrite it: {destination}")
         if not destination.parent.exists() or not destination.parent.is_dir():
@@ -155,6 +174,7 @@ def _validate_preconditions(root: Path, operation: FileOperation, *, rollback: b
 
     if operation.kind is OperationKind.MKDIR:
         destination = _resolve_relative(root, operation.destination, "destination")
+        _reject_symlink_components(root, operation.destination, "destination", include_leaf=False)
         if _lexists(destination):
             raise UnsafePlanError(f"Directory destination already exists: {destination}")
         if not destination.parent.exists() or not destination.parent.is_dir():
@@ -163,6 +183,7 @@ def _validate_preconditions(root: Path, operation: FileOperation, *, rollback: b
 
     if operation.kind is OperationKind.RMDIR and rollback:
         source = _resolve_relative(root, operation.source, "source")
+        _reject_symlink_components(root, operation.source, "source", include_leaf=True)
         if not source.exists() or not source.is_dir():
             raise UnsafePlanError(f"Rollback directory does not exist: {source}")
         return
