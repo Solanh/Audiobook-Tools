@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -13,6 +14,11 @@ JOURNAL_SCHEMA_VERSION = 1
 
 class JournalError(RuntimeError):
     pass
+
+
+def _plan_digest(plan: dict[str, Any]) -> str:
+    canonical = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:
@@ -53,12 +59,14 @@ def create_journal(plan: Plan, path: str | Path) -> dict[str, Any]:
         raise JournalError(f"Journal already exists; refusing to overwrite it: {target}")
 
     now = utc_now_iso()
+    plan_value = plan.to_dict()
     journal: dict[str, Any] = {
         "schema_version": JOURNAL_SCHEMA_VERSION,
         "status": "pending",
         "created_at": now,
         "updated_at": now,
-        "plan": plan.to_dict(),
+        "plan": plan_value,
+        "plan_sha256": _plan_digest(plan_value),
         "operations": [
             {
                 "operation_id": operation.operation_id,
@@ -94,6 +102,9 @@ def load_journal(path: str | Path) -> dict[str, Any]:
         raise JournalError(f"Unsupported journal schema version: {version}")
     if not isinstance(value.get("operations"), list) or not isinstance(value.get("plan"), dict):
         raise JournalError(f"Journal is missing required fields: {source}")
+    expected_digest = value.get("plan_sha256")
+    if not isinstance(expected_digest, str) or expected_digest != _plan_digest(value["plan"]):
+        raise JournalError(f"Journal plan integrity check failed: {source}")
     return value
 
 
