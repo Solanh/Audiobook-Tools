@@ -153,6 +153,30 @@ class ExecutorTests(unittest.TestCase):
             with self.assertRaises(JournalError):
                 load_journal(journal_path)
 
+    def test_symlink_source_is_refused_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = base / "media"
+            state = base / "state"
+            root.mkdir()
+            state.mkdir()
+            target = root / "real.m4b"
+            target.write_bytes(b"book")
+            link = root / "linked.m4b"
+            link.symlink_to(target.name)
+            plan = Plan(
+                root=str(root),
+                operations=(
+                    FileOperation(kind=OperationKind.RENAME, source="linked.m4b", destination="Book.m4b"),
+                ),
+            )
+
+            with self.assertRaises(UnsafePlanError):
+                apply_plan(plan, state / "symlink.json", confirmed=True)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), b"book")
+            self.assertFalse((root / "Book.m4b").exists())
+
     def test_stale_plan_refuses_changed_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
