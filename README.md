@@ -23,6 +23,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map and [docs/TRUENAS.md](do
 - item-level audiobook grouping, including common `Disc 1` / `CD 2` layouts
 - aggregated title/author/narrator/series/identifier hints with evidence and warnings
 - conservative item confidence scoring; conflicting metadata is surfaced instead of silently chosen
+- read-only Audiobookshelf library/item inventory through API-key Bearer authentication
 - written chapter-number parsing and special-section hints
 - release-noise normalization with recorded transformations
 - versioned file-operation plans
@@ -35,7 +36,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map and [docs/TRUENAS.md](do
 - Dockerfile plus a TrueNAS Compose example
 - read-only media mount by default, with a separate opt-in writer service
 
-Provider identification, persistent proposal state, and the review UI are still being built. The filesystem executor exists now so that future approved plans have a safe transaction boundary rather than adding rollback after the fact.
+Provider candidate search/scoring, persistent proposal state, and the review UI are still being built. The filesystem executor exists now so that future approved plans have a safe transaction boundary rather than adding rollback after the fact.
 
 ## Development usage
 
@@ -52,6 +53,25 @@ media-janitor inspect-audiobooks /path/to/audiobooks --json items.json --pretty
 ```
 
 `inspect-audiobooks` is the preferred read-only command for real-library testing. It groups tracks into likely audiobook items, reads embedded tags when possible, records metadata-read failures without aborting the scan, and emits identity hints plus evidence/warnings. It does not generate or apply filesystem changes.
+
+## Audiobookshelf read-only inventory
+
+Create an Audiobookshelf API key for an account that can read the target library, then set it through the environment rather than putting the secret on the command line:
+
+```bash
+export AUDIOBOOKSHELF_URL='http://your-audiobookshelf-host:13378'
+export AUDIOBOOKSHELF_API_KEY='your-api-key'
+
+media-janitor audiobookshelf-inventory --json audiobookshelf.json --pretty
+```
+
+If the server has more than one book library, pass the library ID explicitly:
+
+```bash
+media-janitor audiobookshelf-inventory --library-id lib_xxxxxxxxx --json audiobookshelf.json --pretty
+```
+
+This command only performs GET requests. It normalizes the existing Audiobookshelf title, author, narrator, series, ASIN, ISBN, duration, and path data for later comparison with the filesystem inspection report. `AUDIOBOOKSHELF_TOKEN` is accepted as a legacy fallback, but API keys are preferred.
 
 A plan can be checked without writes:
 
