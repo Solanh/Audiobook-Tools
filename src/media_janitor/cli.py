@@ -11,6 +11,7 @@ from .audiobookshelf import AudiobookshelfError, client_from_environment
 from .executor import ExecutionError, apply_plan, rollback_journal, validate_plan
 from .items import analyze_audiobook_items
 from .journal import JournalError, load_journal
+from .matching import match_audiobook_items
 from .models import MediaKind, Plan
 from .scanner import scan_library
 
@@ -73,6 +74,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of Audiobookshelf item summaries to print (default: 20)",
     )
 
+    abs_match = subparsers.add_parser(
+        "match-audiobookshelf",
+        help="Compare local audiobook inspection data to existing Audiobookshelf items without writing anything",
+    )
+    abs_match.add_argument("path", type=Path, help="Audiobook library or dataset root")
+    abs_match.add_argument(
+        "--library-id",
+        help="Audiobookshelf library id; auto-selects when exactly one book library is available",
+    )
+    abs_match.add_argument("--json", dest="json_path", type=Path, help="Write the complete match report to JSON")
+    abs_match.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+    abs_match.add_argument(
+        "--show",
+        type=int,
+        default=20,
+        help="Number of local match summaries to print (default: 20)",
+    )
+    abs_match.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=3,
+        help="Number of ranked Audiobookshelf candidates to retain per local item (default: 3)",
+    )
+
     validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
     validate.add_argument("plan", type=Path, help="Plan JSON file")
 
@@ -112,6 +137,27 @@ def _load_plan(path: Path) -> Plan:
     if not isinstance(payload, dict):
         raise ValueError(f"Plan JSON must be an object: {path}")
     return Plan.from_dict(payload)
+
+
+def _select_audiobookshelf_library(libraries: Sequence[object], library_id: str | None):
+    if library_id:
+        selected = next((library for library in libraries if getattr(library, "id", None) == library_id), None)
+        if selected is None:
+            known = ", ".join(str(getattr(library, "id", "unknown")) for library in libraries) or "none"
+            raise ValueError(f"Audiobookshelf library id {library_id!r} was not found; available: {known}")
+        return selected
+
+    book_libraries = [library for library in libraries if getattr(library, "media_type", None) == "book"]
+    if len(book_libraries) == 1:
+        return book_libraries[0]
+    if len(libraries) == 1:
+        return libraries[0]
+
+    choices = ", ".join(
+        f"{getattr(library, 'id', 'unknown')} ({getattr(library, 'name', 'unnamed')})"
+        for library in book_libraries or libraries
+    )
+    raise ValueError(f"Multiple Audiobookshelf libraries are available; pass --library-id. Choices: {choices}")
 
 
 def run_scan(args: argparse.Namespace) -> int:
@@ -243,23 +289,7 @@ def run_audiobook_inspection(args: argparse.Namespace) -> int:
 def run_audiobookshelf_inventory(args: argparse.Namespace) -> int:
     client = client_from_environment()
     libraries = client.libraries()
-
-    selected = None
-    if args.library_id:
-        selected = next((library for library in libraries if library.id == args.library_id), None)
-        if selected is None:
-            known = ", ".join(library.id for library in libraries) or "none"
-            raise ValueError(f"Audiobookshelf library id {args.library_id!r} was not found; available: {known}")
-    else:
-        book_libraries = [library for library in libraries if library.media_type == "book"]
-        if len(book_libraries) == 1:
-            selected = book_libraries[0]
-        elif len(libraries) == 1:
-            selected = libraries[0]
-        else:
-            choices = ", ".join(f"{library.id} ({library.name})" for library in book_libraries or libraries)
-            raise ValueError(f"Multiple Audiobookshelf libraries are available; pass --library-id. Choices: {choices}")
-
+    selected = _select_audiobookshelf_library(libraries, args.library_id)
     items = client.library_items(selected.id)
     print(
         json.dumps(
@@ -289,6 +319,68 @@ def run_audiobookshelf_inventory(args: argparse.Namespace) -> int:
         }
         args.json_path.write_text(json.dumps(payload, indent=indent) + "\n", encoding="utf-8")
         print(f"audiobookshelf inventory: {args.json_path}")
+
+    return 0
+
+
+def run_audiobookshelf_match(args: argparse.Namespace) -> int:
+    if args.candidate_limit < 1:
+        raise ValueError("--candidate-limit must be at least 1")
+
+    snapshot = scan_library(args.path)
+    local_items = analyze_audiobook_items(args.path, snapshot=snapshot)
+
+    client = client_from_environment()
+    libraries = client.libraries()
+    selected = _select_audiobookshelf_library(libraries, args.library_id)
+    server_items = client.library_items(selected.id)
+
+    matches = match_audiobook_items(
+        local_items,
+        server_items,
+        candidate_limit=args.candidate_limit,
+    )
+    status_counts = Counter(match.status for match in matches)
+
+    print(
+        json.dumps(
+            {
+                "root": snapshot.root,
+                "server": client.base_url,
+                "library": selected.to_dict(),
+                "local_items": len(local_items),
+                "audiobookshelf_items": len(server_items),
+                "status_counts": dict(sorted(status_counts.items())),
+            },
+            indent=2,
+        )
+    )
+
+    for match in matches[: max(args.show, 0)]:
+        title = match.local_item.title_hint or match.local_item.item_path
+        if match.best:
+            best_title = match.best.item.title or match.best.item.id
+            print(f"{match.status}: {title} -> {best_title} [{match.best.score:.3f}]")
+        else:
+            print(f"{match.status}: {title} -> no Audiobookshelf candidate")
+
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        indent = 2 if args.pretty else None
+        payload = {
+            "schema_version": 1,
+            "created_at": snapshot.created_at,
+            "root": snapshot.root,
+            "server": client.base_url,
+            "library": selected.to_dict(),
+            "local_items": len(local_items),
+            "audiobookshelf_items": len(server_items),
+            "status_counts": dict(sorted(status_counts.items())),
+            "matches": [match.to_dict() for match in matches],
+            "unreadable_paths": list(snapshot.unreadable_paths),
+        }
+        args.json_path.write_text(json.dumps(payload, indent=indent) + "\n", encoding="utf-8")
+        print(f"audiobookshelf matches: {args.json_path}")
 
     return 0
 
@@ -356,6 +448,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_audiobook_inspection(args)
         if args.command == "audiobookshelf-inventory":
             return run_audiobookshelf_inventory(args)
+        if args.command == "match-audiobookshelf":
+            return run_audiobookshelf_match(args)
         if args.command == "validate-plan":
             return run_validate_plan(args)
         if args.command == "apply-plan":
