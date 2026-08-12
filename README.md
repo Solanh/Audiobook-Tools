@@ -5,8 +5,8 @@ This repository started as small Python utilities for fixing audiobook chapter f
 The intended workflow is:
 
 ```text
-scan -> analyze -> identify -> plan -> review -> apply -> verify
-                                      \-> rollback if needed
+scan -> inspect -> identify -> plan -> review -> apply -> verify
+                                         \-> rollback if needed
 ```
 
 A local Ollama-compatible model will be able to use folder, sibling, filename, tag, and server-metadata context to interpret unusually messy media. Model output remains advisory: it never receives direct filesystem or metadata write access.
@@ -19,6 +19,10 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map and [docs/TRUENAS.md](do
 - directory, parent, sibling, and child context capture
 - versioned JSON scan snapshots with source size/mtime information
 - read-only audiobook filename analysis
+- read-only embedded metadata extraction for common audiobook formats through TinyTag
+- item-level audiobook grouping, including common `Disc 1` / `CD 2` layouts
+- aggregated title/author/narrator/series/identifier hints with evidence and warnings
+- conservative item confidence scoring; conflicting metadata is surfaced instead of silently chosen
 - written chapter-number parsing and special-section hints
 - release-noise normalization with recorded transformations
 - versioned file-operation plans
@@ -31,7 +35,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map and [docs/TRUENAS.md](do
 - Dockerfile plus a TrueNAS Compose example
 - read-only media mount by default, with a separate opt-in writer service
 
-The identification/planning/review layers are still being built. The filesystem executor exists now so that future generated plans have a safe transaction boundary rather than adding rollback after the fact.
+Provider identification, persistent proposal state, and the review UI are still being built. The filesystem executor exists now so that future approved plans have a safe transaction boundary rather than adding rollback after the fact.
 
 ## Development usage
 
@@ -43,7 +47,11 @@ media-janitor scan /path/to/media
 media-janitor scan /path/to/media --json snapshot.json --pretty
 media-janitor analyze-audiobooks /path/to/audiobooks
 media-janitor analyze-audiobooks /path/to/audiobooks --json analysis.json --pretty
+media-janitor inspect-audiobooks /path/to/audiobooks
+media-janitor inspect-audiobooks /path/to/audiobooks --json items.json --pretty
 ```
+
+`inspect-audiobooks` is the preferred read-only command for real-library testing. It groups tracks into likely audiobook items, reads embedded tags when possible, records metadata-read failures without aborting the scan, and emits identity hints plus evidence/warnings. It does not generate or apply filesystem changes.
 
 A plan can be checked without writes:
 
@@ -64,7 +72,7 @@ media-janitor rollback /state/journals/PLAN_ID.json \
   --confirm-rollback
 ```
 
-The current write executor targets Linux/TrueNAS so it can require `renameat2(RENAME_NOREPLACE)` rather than fall back to an overwrite-capable rename. Read-only scan/analyze commands remain portable.
+The current write executor targets Linux/TrueNAS so it can require `renameat2(RENAME_NOREPLACE)` rather than fall back to an overwrite-capable rename. Read-only scan/analyze/inspect commands remain portable.
 
 The executor intentionally supports only operations with a defined rollback. Same-filesystem rename/move and directory creation are enabled; metadata writes, cross-filesystem copy/delete, and other destructive operations remain disabled until they have an equally strong recovery design.
 
