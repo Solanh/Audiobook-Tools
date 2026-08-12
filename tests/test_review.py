@@ -56,9 +56,13 @@ class ReviewServerTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        self.addCleanup(thread.join, 2.0)
+
+        def cleanup() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(2.0)
+
+        self.addCleanup(cleanup)
         return base_url
 
     def test_queue_and_detail_render_candidate_evidence(self) -> None:
