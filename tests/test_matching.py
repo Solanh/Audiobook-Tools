@@ -4,7 +4,12 @@ import unittest
 
 from media_janitor.audiobookshelf import AudiobookshelfItem
 from media_janitor.items import AudiobookItemAnalysis
-from media_janitor.matching import match_audiobook_item, score_audiobookshelf_item, text_similarity
+from media_janitor.matching import (
+    match_audiobook_item,
+    match_audiobook_items,
+    score_audiobookshelf_item,
+    text_similarity,
+)
 
 
 def local_item(
@@ -116,6 +121,29 @@ class MatchingTests(unittest.TestCase):
         self.assertIsNotNone(result.margin)
         self.assertLess(result.margin, 0.12)
 
+    def test_candidate_limit_does_not_hide_close_runner_up(self) -> None:
+        local = local_item(series=None, sequence=None, narrators=())
+        first = server_item("a", path="/library/The Final Empire", series=(), narrators=())
+        second = server_item("b", path="/other/The Final Empire", series=(), narrators=())
+
+        result = match_audiobook_item(local, (first, second), candidate_limit=1)
+
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.status, "ambiguous")
+        self.assertIsNotNone(result.margin)
+        self.assertLess(result.margin, 0.12)
+
+    def test_duplicate_strong_assignment_is_downgraded_for_review(self) -> None:
+        server = server_item("same-server-item")
+        first = local_item(path="copy-a/The Final Empire")
+        second = local_item(path="copy-b/The Final Empire")
+
+        results = match_audiobook_items((first, second), (server,))
+
+        self.assertEqual([result.status for result in results], ["ambiguous", "ambiguous"])
+        self.assertTrue(all(result.warnings for result in results))
+        self.assertTrue(all("multiple local items" in result.warnings[0] for result in results))
+
     def test_conflicting_identifier_is_negative_evidence(self) -> None:
         candidate = score_audiobookshelf_item(
             local_item(asin="GOODASIN"),
@@ -138,7 +166,7 @@ class MatchingTests(unittest.TestCase):
         result = match_audiobook_item(local_item(), (unrelated,))
 
         self.assertEqual(result.status, "no_candidate")
-        self.assertLess(result.best.score, 0.45)
+        self.assertLess(result.best.score, 0.35)
 
 
 if __name__ == "__main__":
