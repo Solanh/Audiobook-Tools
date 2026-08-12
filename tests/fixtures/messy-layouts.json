@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "multi-disc-tagged-book",
+      "tree": [
+        "Brandon Sanderson/Mistborn 01 - The Final Empire/Disc 1/Chapter 01.mp3",
+        "Brandon Sanderson/Mistborn 01 - The Final Empire/Disc 2/Chapter 02.mp3"
+      ],
+      "expectation": "group both discs as one local audiobook item"
+    },
+    {
+      "name": "tagless-folder-title",
+      "tree": [
+        "Warbreaker/Chapter One.mp3"
+      ],
+      "expectation": "fall back to folder title and keep provider/server match ambiguous without supporting evidence"
+    },
+    {
+      "name": "duplicate-split-book",
+      "tree": [
+        "The Final Empire Part A/01.mp3",
+        "The Final Empire Part B/02.mp3"
+      ],
+      "expectation": "never allow both local items to become strong assignments to one Audiobookshelf item"
+    },
+    {
+      "name": "conflicting-identifiers",
+      "tree": [
+        "Book With Bad Tags/01.mp3",
+        "Book With Bad Tags/02.mp3"
+      ],
+      "expectation": "surface identifier conflicts as negative evidence rather than silently choosing one"
+    }
+  ]
+}
