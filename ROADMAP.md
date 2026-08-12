@@ -13,10 +13,12 @@ The local LLM is a context interpreter, not an authority. It may parse names, in
 ```text
 SCAN (read only)
   -> SNAPSHOT
-  -> ANALYZE (rules + tags + server metadata + optional local LLM)
-  -> IDENTIFY (provider candidates + evidence)
-  -> PLAN (explicit reversible operations + source fingerprints)
+  -> INSPECT (rules + embedded tags + folder context)
+  -> MATCH CURRENT SERVER STATE (read only)
+  -> IDENTIFY UNRESOLVED ITEMS (provider candidates + evidence + optional local LLM)
+  -> PROPOSE
   -> REVIEW
+  -> PLAN (explicit reversible operations + source fingerprints)
   -> SNAPSHOT/BACKUP CHECK
   -> APPLY (durable journal)
   -> VERIFY
@@ -30,15 +32,21 @@ SCAN (read only)
 ```text
 media_janitor/
   scanner.py          filesystem inventory and directory context
-  models.py           snapshots, versioned plans, reversible operations
+  metadata.py         read-only embedded audio metadata extraction
   audiobook.py        deterministic audiobook filename/chapter parsing
+  items.py            local audiobook grouping and item-level evidence
+  audiobookshelf.py   read-only Audiobookshelf inventory client
+  matching.py         explainable local-to-server candidate scoring
+  models.py           snapshots, versioned plans, reversible operations
   journal.py          durable atomic apply/rollback journal
   executor.py         guarded filesystem apply + rollback
-  cli.py              scan/analyze/validate/apply/rollback commands
+  cli.py              read-only inspection/matching plus guarded write commands
 
-  adapters/           planned
-    audiobookshelf    current metadata, provider search, approved updates, rescan
-    jellyfin          identity/metadata, refresh integration
+  provider adapters/  planned
+    audiobookshelf    metadata-provider search normalization and caching
+
+  state/              planned
+    sqlite             snapshots, proposals, decisions, audit events
 
   llm/                planned
     ollama             local structured context interpretation
@@ -46,6 +54,10 @@ media_janitor/
 
   web/                planned
     review queue       current vs proposed state, evidence, approve/edit/reject
+
+  jellyfin/            planned
+    inventory          server identity/metadata
+    refresh            targeted post-apply refresh integration
 ```
 
 The implementation can stay relatively flat until these pieces become large enough to justify deeper subpackages.
@@ -54,7 +66,7 @@ The implementation can stay relatively flat until these pieces become large enou
 
 These are architectural requirements, not optional polish:
 
-1. Scanning and analysis never mutate media.
+1. Scanning, inspection, matching, and provider lookup never mutate media.
 2. A model/provider response never directly becomes a filesystem operation.
 3. Every write comes from an explicit versioned plan.
 4. Plans used for filesystem apply must be fully reversible.
@@ -68,6 +80,8 @@ These are architectural requirements, not optional polish:
 12. Concurrent apply/rollback operations sharing the same state directory are locked out.
 13. Audiobookshelf/Jellyfin databases are never edited directly.
 14. Metadata embedding, deletion, and other destructive operations remain disabled until they have explicit rollback semantics.
+15. Candidate output limits never hide runner-up evidence used to decide ambiguity.
+16. Multiple local items cannot silently become strong assignments to the same server item.
 
 A TrueNAS/ZFS snapshot before a large apply remains the second recovery layer above the application-level journal.
 
@@ -128,7 +142,8 @@ Current apply refuses:
 - [x] Add read-only-by-default TrueNAS Compose example with opt-in writer service.
 - [x] Document TrueNAS deployment and rollback workflow.
 - [x] Add unit coverage for scanning, parsing, apply, rollback, collision refusal, stale plans, and crash recovery.
-- [ ] Add synthetic fixture generator with intentionally ugly audiobook/movie/show trees.
+- [x] Add an initial generated synthetic audiobook fixture set without real media content.
+- [ ] Extend synthetic fixtures to Jellyfin movie/show trees when that adapter starts.
 - [ ] Add structured logging.
 - [x] Add CI that runs the test suite and validates the Docker build.
 
@@ -138,16 +153,16 @@ The core can safely observe a library and has a proven transaction boundary for 
 
 ## Phase 1 - Audiobook analysis
 
-- [ ] Read embedded tags from M4B/MP3/FLAC without mutating files.
-- [ ] Detect audiobook item boundaries from folders and tracks.
+- [x] Read embedded tags from common M4B/MP3/FLAC-style audiobook formats without mutating files.
+- [x] Detect basic audiobook item boundaries from folders/tracks, including common disc subfolders.
 - [x] Port useful written chapter-number parsing from the legacy script into tested functions.
 - [x] Begin deterministic release-noise normalization while preserving transformation evidence.
 - [ ] Expand normalization for separators, casing, bracketed tags, disc markers, release groups, and site suffixes.
-- [ ] Extract title, author, narrator, series, sequence, ISBN, and ASIN when present.
-- [ ] Infer likely title/author/series from directory hierarchy.
-- [ ] Flag suspicious multi-book folders and split-book layouts.
-- [ ] Produce an item-level read-only analysis report, not just file-level filename hints.
-- [ ] Generate intentionally messy test fixtures for common audiobook layouts.
+- [x] Extract title, author, narrator, series, sequence, ISBN, and ASIN when embedded metadata provides them.
+- [ ] Infer likely title/author/series more deeply from multi-level directory hierarchy.
+- [ ] Flag suspicious multi-book folders and split-book layouts before server matching.
+- [x] Produce an item-level read-only analysis report, not just file-level filename hints.
+- [x] Generate intentionally messy synthetic test layouts for common audiobook cases.
 
 ### Exit condition
 
@@ -155,15 +170,19 @@ A scan of the real audiobook dataset produces useful item-level proposed identit
 
 ## Phase 2 - Audiobookshelf adapter and identification
 
-- [ ] Configure Audiobookshelf base URL and API token through environment/file secrets.
-- [ ] Import existing library item metadata and paths.
-- [ ] Use Audiobookshelf APIs rather than direct database edits.
-- [ ] Search Audiobookshelf-supported metadata providers.
+- [x] Configure Audiobookshelf base URL and API credential through environment secrets.
+- [x] Import existing library item metadata and paths read-only.
+- [x] Use Audiobookshelf APIs rather than direct database edits.
+- [x] Compare local inspection items to existing Audiobookshelf items before performing provider searches.
+- [x] Rank current-server candidates using identifiers, title, author, series, narrator, duration, and path context.
+- [x] Record positive and negative evidence contributing to each current-server score.
+- [x] Prevent close runner-ups/output limits from creating false strong matches.
+- [x] Detect duplicate strong assignments to one Audiobookshelf item and downgrade them for review.
+- [ ] Search Audiobookshelf-supported metadata providers for unresolved items.
 - [ ] Normalize provider results into a common candidate model.
-- [ ] Rank candidates using identifiers, title, author, series, narrator, duration, language, and existing folder context.
+- [ ] Rank provider candidates using identifiers, title, author, series, narrator, duration, language, and existing context.
 - [ ] Cache provider queries and add retry/rate-limit handling.
-- [ ] Record evidence contributing to each score.
-- [ ] Keep parsing confidence, identity confidence, edition confidence, and operation confidence separate.
+- [ ] Keep parsing confidence, current-server match confidence, provider identity confidence, edition confidence, and operation confidence separate.
 
 ### Exit condition
 
@@ -171,7 +190,7 @@ Most audiobooks have a ranked candidate list with understandable evidence and no
 
 ## Phase 3 - Proposal generation and review
 
-- [ ] Add SQLite state for snapshots, proposals, decisions, and audit events.
+- [ ] Add SQLite state for snapshots, server matches, provider candidates, proposals, decisions, and audit events.
 - [ ] Convert approved identity proposals into explicit filesystem/metadata plans.
 - [ ] Populate source size/mtime fingerprints on generated filesystem operations.
 - [ ] Build a small local web review queue.
@@ -269,15 +288,14 @@ Only after the manual workflow is trusted:
 
 ## Near-term implementation order
 
-1. Add synthetic messy audiobook fixtures.
-2. Add read-only embedded tag extraction.
-3. Build folder/item-level audiobook grouping and identity parsing.
-4. Add Audiobookshelf read/search adapter.
-5. Add candidate/evidence scoring.
-6. Add SQLite proposal state.
-7. Generate real reviewed plans with source fingerprints.
-8. Build the review UI.
-9. Add reversible Audiobookshelf metadata transactions.
-10. Add Ollama context assistance.
-11. Add Jellyfin movie/TV adapter using the proven core.
-12. Publish a versioned container image for easy TrueNAS deployment.
+1. Run `inspect-audiobooks` and `match-audiobookshelf` against a real read-only library and collect failure patterns.
+2. Improve hierarchy inference and suspicious multi-book/split-layout detection from those patterns.
+3. Add read-only Audiobookshelf metadata-provider search for unresolved items.
+4. Normalize and score provider candidates with separate edition confidence.
+5. Add SQLite snapshot/match/proposal/audit state under `/state`.
+6. Generate real reviewed plans with source fingerprints from approved proposals.
+7. Build the review UI.
+8. Add reversible Audiobookshelf metadata transactions.
+9. Add Ollama context assistance for ambiguous parsing/ranking only.
+10. Add Jellyfin movie/TV adapter using the proven core.
+11. Publish a versioned container image for easy TrueNAS deployment.
