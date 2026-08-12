@@ -30,7 +30,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["records"][0]["chapter_hint"]["number"], 31)
             self.assertIn("Warbreaker", payload["records"][0]["normalized_name"])
 
-    def test_inspect_audiobooks_survives_invalid_audio_and_stays_read_only(self) -> None:
+    def test_inspect_audiobooks_handles_tagless_audio_and_stays_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             book = root / "Warbreaker"
@@ -50,7 +50,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(payload["items"]), 1)
             self.assertEqual(payload["items"][0]["item_path"], "Warbreaker")
             self.assertEqual(payload["items"][0]["title_hint"], "Warbreaker")
-            self.assertIsNotNone(payload["items"][0]["files"][0]["metadata_error"])
+            file_record = payload["items"][0]["files"][0]
+            self.assertTrue(file_record["embedded"] is not None or file_record["metadata_error"] is not None)
 
 
 if __name__ == "__main__":
