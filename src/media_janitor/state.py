@@ -5,7 +5,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from uuid import uuid4
 
 from .models import utc_now_iso
@@ -47,6 +47,7 @@ class ProposalRecord:
     status: str
     created_at: str
     updated_at: str
+    candidate_sha256: str
     candidate: dict[str, Any]
     decision_note: str | None
 
@@ -58,6 +59,7 @@ class ProposalRecord:
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "candidate_sha256": self.candidate_sha256,
             "candidate": self.candidate,
             "decision_note": self.decision_note,
         }
@@ -151,6 +153,7 @@ class StateStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     candidate_json TEXT NOT NULL,
+                    candidate_sha256 TEXT NOT NULL,
                     decision_note TEXT,
                     FOREIGN KEY(source_report_id) REFERENCES reports(report_id) ON DELETE RESTRICT,
                     UNIQUE(source_report_id, local_item_path)
@@ -311,6 +314,7 @@ class StateStore:
         proposal_id = proposal_id or uuid4().hex
         now = utc_now_iso()
         candidate_json = _canonical_json(candidate)
+        candidate_digest = _json_digest(candidate_json)
 
         with self._connect() as connection:
             self._ensure_initialized(connection)
@@ -322,27 +326,47 @@ class StateStore:
                 raise StateError(f"Cannot stage proposal from missing report: {source_report_id}")
 
             existing = connection.execute(
-                "SELECT proposal_id FROM proposals WHERE source_report_id = ? AND local_item_path = ?",
+                """
+                SELECT proposal_id, candidate_sha256
+                FROM proposals
+                WHERE source_report_id = ? AND local_item_path = ?
+                """,
                 (source_report_id, clean_path),
             ).fetchone()
             if existing is not None:
+                if existing["candidate_sha256"] != candidate_digest:
+                    raise StateError(
+                        f"Proposal already exists for {clean_path!r} in report {source_report_id} with different content"
+                    )
                 return self.get_proposal(str(existing["proposal_id"]), connection=connection)
 
             connection.execute(
                 """
                 INSERT INTO proposals(
                     proposal_id, source_report_id, local_item_path, status,
-                    created_at, updated_at, candidate_json, decision_note
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, NULL)
+                    created_at, updated_at, candidate_json, candidate_sha256, decision_note
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NULL)
                 """,
-                (proposal_id, source_report_id, clean_path, now, now, candidate_json),
+                (
+                    proposal_id,
+                    source_report_id,
+                    clean_path,
+                    now,
+                    now,
+                    candidate_json,
+                    candidate_digest,
+                ),
             )
             self._append_audit(
                 connection,
                 event_type="proposal_staged",
                 entity_type="proposal",
                 entity_id=proposal_id,
-                payload={"source_report_id": source_report_id, "local_item_path": clean_path},
+                payload={
+                    "source_report_id": source_report_id,
+                    "local_item_path": clean_path,
+                    "candidate_sha256": candidate_digest,
+                },
             )
 
         return ProposalRecord(
@@ -352,6 +376,7 @@ class StateStore:
             status="pending",
             created_at=now,
             updated_at=now,
+            candidate_sha256=candidate_digest,
             candidate=candidate,
             decision_note=None,
         )
@@ -370,6 +395,10 @@ class StateStore:
             row = connection.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
             if row is None:
                 raise StateError(f"Proposal not found: {proposal_id}")
+            candidate_json = str(row["candidate_json"])
+            candidate_digest = _json_digest(candidate_json)
+            if candidate_digest != row["candidate_sha256"]:
+                raise StateError(f"Stored proposal {proposal_id} failed integrity verification")
             return ProposalRecord(
                 proposal_id=str(row["proposal_id"]),
                 source_report_id=str(row["source_report_id"]),
@@ -377,7 +406,8 @@ class StateStore:
                 status=str(row["status"]),
                 created_at=str(row["created_at"]),
                 updated_at=str(row["updated_at"]),
-                candidate=_decode_object(str(row["candidate_json"]), label="proposal candidate"),
+                candidate_sha256=str(row["candidate_sha256"]),
+                candidate=_decode_object(candidate_json, label="proposal candidate"),
                 decision_note=row["decision_note"],
             )
         finally:
@@ -428,7 +458,11 @@ class StateStore:
                 event_type="proposal_decided",
                 entity_type="proposal",
                 entity_id=proposal_id,
-                payload={"decision": decision, "note": note},
+                payload={
+                    "decision": decision,
+                    "note": note,
+                    "candidate_sha256": current.candidate_sha256,
+                },
             )
 
         return self.get_proposal(proposal_id)
