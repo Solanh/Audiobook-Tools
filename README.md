@@ -5,13 +5,13 @@ This repository started as small Python utilities for fixing audiobook chapter f
 The intended workflow is:
 
 ```text
-scan -> inspect -> match current server -> identify unresolved -> propose -> review -> apply -> verify
-                                                                               \-> rollback if needed
+scan -> inspect -> match current server -> identify unresolved -> stage -> review -> plan -> apply -> verify
+                                                                                         \-> rollback if needed
 ```
 
 A local Ollama-compatible model will be able to use folder, sibling, filename, tag, and server-metadata context to interpret unusually messy media. Model output remains advisory: it never receives direct filesystem or metadata write access.
 
-See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs/MATCHING.md) for current-server matching, [docs/PROVIDER_SEARCH.md](docs/PROVIDER_SEARCH.md) for provider identification, and [docs/TRUENAS.md](docs/TRUENAS.md) for container/TrueNAS setup.
+See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs/MATCHING.md) for current-server matching, [docs/PROVIDER_SEARCH.md](docs/PROVIDER_SEARCH.md) for provider identification, [docs/STATE.md](docs/STATE.md) for persistent review state, and [docs/TRUENAS.md](docs/TRUENAS.md) for container/TrueNAS setup.
 
 ## Current foundation
 
@@ -29,6 +29,11 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs
 - read-only Audiobookshelf metadata-provider discovery and book search
 - separate provider book-identity and audiobook-edition confidence
 - capped provider lookups only for items not already strongly matched to current Audiobookshelf state
+- persistent SQLite observation reports, proposals, decisions, and audit events under `/state`
+- SHA-256 integrity verification for persisted reports and staged proposal candidates
+- explicit pending-proposal staging; provider results never become approvals automatically
+- immutable human `approved` / `rejected` / `ignored` review decisions
+- review decisions remain disconnected from filesystem and Audiobookshelf write operations
 - synthetic messy-layout fixtures without storing real audiobook content
 - written chapter-number parsing and special-section hints
 - release-noise normalization with recorded transformations
@@ -42,7 +47,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs
 - Dockerfile plus a TrueNAS Compose example
 - read-only media mount by default, with a separate opt-in writer service
 
-Persistent proposal state and the review UI are still being built. Provider results remain evidence only; they do not authorize writes.
+The next major gap is converting explicitly approved review records into inspectable draft plans and building a small review UI. An `approved` proposal currently means approved **in review state only**; it cannot modify media or Audiobookshelf.
 
 ## Development usage
 
@@ -84,17 +89,50 @@ media-janitor identify-audiobooks /path/to/audiobooks \
   --pretty
 ```
 
-The command discovers the providers exposed by the Audiobookshelf server, validates the selected slug, and searches only unresolved local items. `audible` is the default because audiobook-specific results can provide ASIN, narrator, duration, series, language, and abridged state. Other server-supported providers can be selected explicitly.
+The command discovers providers exposed by Audiobookshelf, validates the selected slug, and searches only unresolved local items. `audible` is the default because audiobook-specific results can provide ASIN, narrator, duration, series, language, and abridged state. Other server-supported providers can be selected explicitly.
 
-Provider results report `identity_score` separately from `edition_score`. A result can therefore be a strong book identity without claiming that it is the same audiobook edition. Missing or weak edition evidence is surfaced as a warning.
+Provider results report `identity_score` separately from `edition_score`. A result can therefore be a strong book identity without claiming that it is the same audiobook edition. Missing or weak edition evidence is surfaced as a warning. Provider search is capped at 10 unresolved items per run by default.
 
-Provider search is capped at 10 unresolved items per run by default. Increase `--max-provider-searches` deliberately after inspecting initial results.
+## Persistent review state
 
-All inventory, matching, and identification commands are observation-only. They do not rename files, update Audiobookshelf metadata, trigger library scans, approve candidates, or create executable cleanup plans.
+Persist an identification run to a state directory outside the media root:
+
+```bash
+media-janitor identify-audiobooks /path/to/audiobooks \
+  --state-dir /state \
+  --json /state/identify.json \
+  --pretty
+```
+
+Persisting the report still does not create proposals automatically. To stage only strong provider identity candidates as **pending** proposals:
+
+```bash
+media-janitor identify-audiobooks /path/to/audiobooks \
+  --state-dir /state \
+  --stage-strong-proposals
+```
+
+Review state can then be inspected and decided explicitly:
+
+```bash
+media-janitor state-status --state-dir /state
+media-janitor proposal-list --state-dir /state --status pending
+
+media-janitor proposal-decide PROPOSAL_ID \
+  --state-dir /state \
+  --decision approved \
+  --note 'Reviewed identity and edition evidence'
+
+media-janitor audit-list --state-dir /state
+```
+
+Reports and candidate payloads are content-hashed and verified when loaded. A final proposal decision is immutable in the current schema so later evidence creates new history rather than rewriting the old decision.
+
+`proposal-decide --decision approved` is deliberately **not** an apply command. It records review state only. There is currently no code path from proposal approval to `apply-plan` or to an Audiobookshelf write endpoint.
 
 ## Guarded filesystem writes
 
-A plan can be checked without writes:
+A manually supplied plan can be checked without writes:
 
 ```bash
 media-janitor validate-plan /path/to/plan.json
@@ -129,7 +167,7 @@ The repository includes:
 - `compose.truenas.example.yaml`
 - [TrueNAS deployment instructions](docs/TRUENAS.md)
 
-The normal service mounts `/media` read-only. A separate writer service under the Compose `write` profile mounts it read/write only for an explicitly reviewed apply or rollback. `/state` is persistent and separate so rollback journals cannot be moved along with the media they protect.
+The normal service mounts `/media` read-only and `/state` read/write. A separate writer service under the Compose `write` profile mounts `/media` read/write only for an explicitly reviewed apply or rollback. Keeping `/state` separate means review state and rollback journals cannot be moved along with the media they protect.
 
 A TrueNAS/ZFS snapshot before a large apply is still recommended as a second recovery layer.
 
