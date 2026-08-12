@@ -189,16 +189,22 @@ def score_provider_result(
 
     identity_score = round(min(max(identity, 0.0), 1.0), 3)
 
-    edition_components: list[tuple[float, float]] = []
+    # Edition confidence is absolute evidence coverage rather than a score normalized
+    # over whichever fields happen to be present. Missing narrator/duration/ASIN data
+    # therefore lowers confidence instead of allowing a weak ISBN-only match to become 1.0.
+    edition_evidence_present = False
+    edition_score_value = 0.0
 
     if local_asin and result_asin:
+        edition_evidence_present = True
         value = 1.0 if local_asin == result_asin else 0.0
-        edition_components.append((0.45, value))
+        contribution = 0.65 * value
+        edition_score_value += contribution
         evidence.append(
             ProviderEvidence(
                 "edition",
                 "asin",
-                0.45 * value,
+                contribution,
                 "ASIN supports the same audiobook edition" if value else "ASIN indicates a different edition",
             )
         )
@@ -208,45 +214,47 @@ def score_provider_result(
         provider_result.duration_seconds,
     )
     if duration_similarity is not None and duration_detail:
-        edition_components.append((0.35, duration_similarity))
+        edition_evidence_present = True
+        contribution = 0.20 * duration_similarity
+        edition_score_value += contribution
         evidence.append(
             ProviderEvidence(
                 "edition",
                 "duration",
-                0.35 * duration_similarity,
+                contribution,
                 duration_detail,
             )
         )
 
     narrator_similarity = _best_similarity(local.narrator_hints, provider_result.narrators)
     if local.narrator_hints and provider_result.narrators:
-        edition_components.append((0.15, narrator_similarity))
+        edition_evidence_present = True
+        contribution = 0.10 * narrator_similarity
+        edition_score_value += contribution
         evidence.append(
             ProviderEvidence(
                 "edition",
                 "narrator",
-                0.15 * narrator_similarity,
+                contribution,
                 f"narrator similarity {narrator_similarity:.2f}",
             )
         )
 
     if local_isbn and result_isbn:
+        edition_evidence_present = True
         value = 1.0 if local_isbn == result_isbn else 0.0
-        edition_components.append((0.05, value))
+        contribution = 0.05 * value
+        edition_score_value += contribution
         evidence.append(
             ProviderEvidence(
                 "edition",
                 "isbn",
-                0.05 * value,
+                contribution,
                 "ISBN agrees" if value else "ISBN differs",
             )
         )
 
-    if edition_components:
-        total_weight = sum(weight for weight, _ in edition_components)
-        edition_score = round(sum(weight * value for weight, value in edition_components) / total_weight, 3)
-    else:
-        edition_score = None
+    edition_score = round(min(max(edition_score_value, 0.0), 1.0), 3) if edition_evidence_present else None
 
     return ProviderCandidateScore(
         result=provider_result,
