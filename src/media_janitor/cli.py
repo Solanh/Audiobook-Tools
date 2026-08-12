@@ -13,6 +13,7 @@ from .items import analyze_audiobook_items
 from .journal import JournalError, load_journal
 from .matching import match_audiobook_items
 from .models import MediaKind, Plan
+from .provider_matching import rank_provider_results
 from .scanner import scan_library
 
 
@@ -96,6 +97,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Number of ranked Audiobookshelf candidates to retain per local item (default: 3)",
+    )
+
+    identify = subparsers.add_parser(
+        "identify-audiobooks",
+        help="Search an Audiobookshelf metadata provider for local items not already strongly matched on the server",
+    )
+    identify.add_argument("path", type=Path, help="Audiobook library or dataset root")
+    identify.add_argument(
+        "--library-id",
+        help="Audiobookshelf library id; auto-selects when exactly one book library is available",
+    )
+    identify.add_argument(
+        "--provider",
+        default="audible",
+        help="Audiobookshelf metadata-provider slug to search (default: audible)",
+    )
+    identify.add_argument(
+        "--max-provider-searches",
+        type=int,
+        default=10,
+        help="Maximum unresolved local items to query against the provider in one run (default: 10)",
+    )
+    identify.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=3,
+        help="Number of provider candidates to retain per searched local item (default: 3)",
+    )
+    identify.add_argument("--json", dest="json_path", type=Path, help="Write the complete identification report to JSON")
+    identify.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+    identify.add_argument(
+        "--show",
+        type=int,
+        default=20,
+        help="Number of unresolved-item summaries to print (default: 20)",
     )
 
     validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
@@ -385,6 +421,112 @@ def run_audiobookshelf_match(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_identify_audiobooks(args: argparse.Namespace) -> int:
+    if args.candidate_limit < 1:
+        raise ValueError("--candidate-limit must be at least 1")
+    if args.max_provider_searches < 1:
+        raise ValueError("--max-provider-searches must be at least 1")
+
+    snapshot = scan_library(args.path)
+    local_items = analyze_audiobook_items(args.path, snapshot=snapshot)
+
+    client = client_from_environment()
+    libraries = client.libraries()
+    selected = _select_audiobookshelf_library(libraries, args.library_id)
+    server_items = client.library_items(selected.id)
+    server_matches = match_audiobook_items(local_items, server_items, candidate_limit=3)
+
+    providers = client.metadata_providers()
+    provider = next((value for value in providers if value.value == args.provider), None)
+    if provider is None:
+        choices = ", ".join(f"{value.value} ({value.text})" for value in providers) or "none"
+        raise ValueError(f"Audiobookshelf metadata provider {args.provider!r} is unavailable; choices: {choices}")
+
+    unresolved = [match for match in server_matches if match.status != "strong_candidate"]
+    records: list[dict[str, object]] = []
+    provider_searches = 0
+    provider_status_counts: Counter[str] = Counter()
+
+    for server_match in unresolved:
+        local = server_match.local_item
+        record: dict[str, object] = {
+            "local_item_path": local.item_path,
+            "current_server_match": server_match.to_dict(),
+            "provider_search": None,
+            "provider_search_skipped_reason": None,
+        }
+
+        title = (local.title_hint or "").strip()
+        if not title:
+            record["provider_search_skipped_reason"] = "no usable local title hint"
+        elif provider_searches >= args.max_provider_searches:
+            record["provider_search_skipped_reason"] = "provider-search cap reached"
+        else:
+            author = local.author_hints[0] if local.author_hints else None
+            raw_results = client.search_books(provider.value, title, author)
+            provider_match = rank_provider_results(
+                local,
+                provider.value,
+                raw_results,
+                candidate_limit=args.candidate_limit,
+            )
+            record["provider_search"] = provider_match.to_dict()
+            provider_searches += 1
+            provider_status_counts[provider_match.status] += 1
+
+        records.append(record)
+
+    skipped = sum(1 for record in records if record["provider_search_skipped_reason"])
+    summary = {
+        "root": snapshot.root,
+        "server": client.base_url,
+        "library": selected.to_dict(),
+        "provider": provider.to_dict(),
+        "local_items": len(local_items),
+        "strong_current_server_matches": len(local_items) - len(unresolved),
+        "unresolved_items": len(unresolved),
+        "provider_searches": provider_searches,
+        "provider_searches_skipped": skipped,
+        "provider_status_counts": dict(sorted(provider_status_counts.items())),
+    }
+    print(json.dumps(summary, indent=2))
+
+    for record in records[: max(args.show, 0)]:
+        server_match = record["current_server_match"]
+        local = server_match["local_item"]
+        title = local.get("title_hint") or record["local_item_path"]
+        provider_search = record["provider_search"]
+        if provider_search and provider_search.get("candidates"):
+            best = provider_search["candidates"][0]
+            provider_title = best["provider_result"].get("title") or "unknown title"
+            identity_score = best["identity_score"]
+            edition_score = best["edition_score"]
+            edition_text = f", edition {edition_score:.3f}" if edition_score is not None else ", edition unknown"
+            print(
+                f"{provider_search['status']}: {title} -> {provider_title} "
+                f"[identity {identity_score:.3f}{edition_text}]"
+            )
+        elif record["provider_search_skipped_reason"]:
+            print(f"skipped: {title} | {record['provider_search_skipped_reason']}")
+        else:
+            print(f"no_candidate: {title} -> no {provider.value} result")
+
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        indent = 2 if args.pretty else None
+        payload = {
+            "schema_version": 1,
+            "created_at": snapshot.created_at,
+            **summary,
+            "records": records,
+            "unreadable_paths": list(snapshot.unreadable_paths),
+        }
+        args.json_path.write_text(json.dumps(payload, indent=indent) + "\n", encoding="utf-8")
+        print(f"identification report: {args.json_path}")
+
+    return 0
+
+
 def run_validate_plan(args: argparse.Namespace) -> int:
     plan = _load_plan(args.plan)
     validate_plan(plan)
@@ -450,6 +592,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_audiobookshelf_inventory(args)
         if args.command == "match-audiobookshelf":
             return run_audiobookshelf_match(args)
+        if args.command == "identify-audiobooks":
+            return run_identify_audiobooks(args)
         if args.command == "validate-plan":
             return run_validate_plan(args)
         if args.command == "apply-plan":
