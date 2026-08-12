@@ -51,6 +51,53 @@ class AudiobookshelfItem:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class AudiobookshelfMetadataProvider:
+    value: str
+    text: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"value": self.value, "text": self.text}
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderBookResult:
+    provider: str
+    provider_id: str | None
+    title: str | None
+    subtitle: str | None
+    authors: tuple[str, ...]
+    narrators: tuple[str, ...]
+    series: tuple[tuple[str, str | None], ...]
+    duration_seconds: float | None
+    asin: str | None
+    isbn: str | None
+    language: str | None
+    publisher: str | None
+    published_year: str | None
+    abridged: bool | None
+    cover: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "provider_id": self.provider_id,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "authors": list(self.authors),
+            "narrators": list(self.narrators),
+            "series": [{"name": name, "sequence": sequence} for name, sequence in self.series],
+            "duration_seconds": self.duration_seconds,
+            "asin": self.asin,
+            "isbn": self.isbn,
+            "language": self.language,
+            "publisher": self.publisher,
+            "published_year": self.published_year,
+            "abridged": self.abridged,
+            "cover": self.cover,
+        }
+
+
 def _clean(value: object) -> str | None:
     if value is None:
         return None
@@ -78,13 +125,35 @@ def _name_values(value: object) -> tuple[str, ...]:
         names: list[object] = []
         for item in value:
             if isinstance(item, dict):
-                names.append(item.get("name"))
+                names.append(item.get("name") or item.get("author") or item.get("narrator"))
             else:
                 names.append(item)
         return _dedupe(names)
     if isinstance(value, str):
         return _dedupe(part.strip() for part in value.split(","))
     return ()
+
+
+def _series_values(value: object) -> tuple[tuple[str, str | None], ...]:
+    if not isinstance(value, list):
+        return ()
+    result: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if isinstance(item, dict):
+            name = _clean(item.get("name") or item.get("series"))
+            sequence = _clean(item.get("sequence") or item.get("position"))
+        else:
+            name = _clean(item)
+            sequence = None
+        if not name:
+            continue
+        key = (name.casefold(), (sequence or "").casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((name, sequence))
+    return tuple(result)
 
 
 def normalize_library(value: dict[str, Any]) -> AudiobookshelfLibrary:
@@ -114,19 +183,6 @@ def normalize_item(value: dict[str, Any]) -> AudiobookshelfItem:
     if not narrators:
         narrators = _name_values(metadata.get("narratorName"))
 
-    series_values: list[tuple[str, str | None]] = []
-    raw_series = metadata.get("series")
-    if isinstance(raw_series, list):
-        for raw in raw_series:
-            if isinstance(raw, dict):
-                name = _clean(raw.get("name"))
-                if name:
-                    series_values.append((name, _clean(raw.get("sequence"))))
-            else:
-                name = _clean(raw)
-                if name:
-                    series_values.append((name, None))
-
     duration = media.get("duration")
     duration_seconds = float(duration) if isinstance(duration, (int, float)) else None
 
@@ -137,10 +193,65 @@ def normalize_item(value: dict[str, Any]) -> AudiobookshelfItem:
         title=_clean(metadata.get("title")),
         authors=authors,
         narrators=narrators,
-        series=tuple(series_values),
+        series=_series_values(metadata.get("series")),
         duration_seconds=duration_seconds,
         asin=_clean(metadata.get("asin")),
         isbn=_clean(metadata.get("isbn")),
+    )
+
+
+def normalize_metadata_provider(value: dict[str, Any]) -> AudiobookshelfMetadataProvider:
+    provider_value = _clean(value.get("value"))
+    if not provider_value:
+        raise AudiobookshelfError("Audiobookshelf metadata-provider response is missing value")
+    return AudiobookshelfMetadataProvider(
+        value=provider_value,
+        text=_clean(value.get("text")) or provider_value,
+    )
+
+
+def normalize_provider_book(provider: str, value: dict[str, Any]) -> ProviderBookResult:
+    clean_provider = provider.strip()
+    if not clean_provider:
+        raise ValueError("provider is required")
+
+    duration_seconds: float | None = None
+    duration = value.get("duration")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0:
+        # Audiobookshelf provider results expose audiobook duration in minutes.
+        duration_seconds = float(duration) * 60.0
+
+    authors = _name_values(value.get("authors"))
+    if not authors:
+        authors = _name_values(value.get("author"))
+
+    narrators = _name_values(value.get("narrators"))
+    if not narrators:
+        narrators = _name_values(value.get("narrator"))
+
+    provider_id = _clean(value.get("id"))
+    if not provider_id:
+        provider_id = _clean(value.get("asin")) or _clean(value.get("key")) or _clean(value.get("edition"))
+
+    abridged_raw = value.get("abridged")
+    abridged = abridged_raw if isinstance(abridged_raw, bool) else None
+
+    return ProviderBookResult(
+        provider=clean_provider,
+        provider_id=provider_id,
+        title=_clean(value.get("title")),
+        subtitle=_clean(value.get("subtitle")),
+        authors=authors,
+        narrators=narrators,
+        series=_series_values(value.get("series")),
+        duration_seconds=duration_seconds,
+        asin=_clean(value.get("asin")),
+        isbn=_clean(value.get("isbn")),
+        language=_clean(value.get("language")),
+        publisher=_clean(value.get("publisher")),
+        published_year=_clean(value.get("publishedYear")),
+        abridged=abridged,
+        cover=_clean(value.get("cover")),
     )
 
 
@@ -160,7 +271,7 @@ class AudiobookshelfClient:
         base = self.base_url + "/"
         url = urljoin(base, path.lstrip("/"))
         if query:
-            encoded = urlencode({key: str(value) for key, value in query.items()})
+            encoded = urlencode({key: str(value) for key, value in query.items() if value is not None})
             url = f"{url}?{encoded}"
         return url
 
@@ -211,6 +322,47 @@ class AudiobookshelfClient:
         if not isinstance(raw_items, list):
             raise AudiobookshelfError("Unexpected Audiobookshelf library-items response")
         return tuple(normalize_item(item) for item in raw_items if isinstance(item, dict))
+
+    def metadata_providers(self) -> tuple[AudiobookshelfMetadataProvider, ...]:
+        payload = self._get_json("api/search/providers")
+        providers = payload.get("providers") if isinstance(payload, dict) else None
+        raw_books = providers.get("books") if isinstance(providers, dict) else None
+        if not isinstance(raw_books, list):
+            raise AudiobookshelfError("Unexpected Audiobookshelf metadata-providers response")
+        return tuple(normalize_metadata_provider(item) for item in raw_books if isinstance(item, dict))
+
+    def search_books(
+        self,
+        provider: str,
+        title: str,
+        author: str | None = None,
+        *,
+        library_item_id: str | None = None,
+    ) -> tuple[ProviderBookResult, ...]:
+        clean_provider = provider.strip()
+        clean_title = title.strip()
+        clean_author = (author or "").strip()
+        if not clean_provider:
+            raise ValueError("Audiobookshelf metadata provider is required")
+        if not clean_title:
+            raise ValueError("Book title is required for provider search")
+
+        query: dict[str, object] = {
+            "provider": clean_provider,
+            "title": clean_title,
+            "author": clean_author,
+        }
+        if library_item_id:
+            query["id"] = library_item_id.strip()
+
+        payload = self._get_json("api/search/books", query)
+        if not isinstance(payload, list):
+            raise AudiobookshelfError("Unexpected Audiobookshelf book-search response")
+        return tuple(
+            normalize_provider_book(clean_provider, item)
+            for item in payload
+            if isinstance(item, dict)
+        )
 
 
 def client_from_environment() -> AudiobookshelfClient:

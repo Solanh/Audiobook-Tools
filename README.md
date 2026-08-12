@@ -5,13 +5,13 @@ This repository started as small Python utilities for fixing audiobook chapter f
 The intended workflow is:
 
 ```text
-scan -> inspect -> match/identify -> plan -> review -> apply -> verify
-                                               \-> rollback if needed
+scan -> inspect -> match current server -> identify unresolved -> propose -> review -> apply -> verify
+                                                                               \-> rollback if needed
 ```
 
 A local Ollama-compatible model will be able to use folder, sibling, filename, tag, and server-metadata context to interpret unusually messy media. Model output remains advisory: it never receives direct filesystem or metadata write access.
 
-See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs/MATCHING.md) for the current identity-matching rules, and [docs/TRUENAS.md](docs/TRUENAS.md) for the container/TrueNAS setup.
+See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs/MATCHING.md) for current-server matching, [docs/PROVIDER_SEARCH.md](docs/PROVIDER_SEARCH.md) for provider identification, and [docs/TRUENAS.md](docs/TRUENAS.md) for container/TrueNAS setup.
 
 ## Current foundation
 
@@ -26,6 +26,9 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs
 - read-only Audiobookshelf library/item inventory through API-key Bearer authentication
 - explainable local-to-Audiobookshelf candidate scoring using identifiers, title, author, narrator, series, duration, and path evidence
 - ambiguity protection for close runner-ups and duplicate local folders targeting the same Audiobookshelf item
+- read-only Audiobookshelf metadata-provider discovery and book search
+- separate provider book-identity and audiobook-edition confidence
+- capped provider lookups only for items not already strongly matched to current Audiobookshelf state
 - synthetic messy-layout fixtures without storing real audiobook content
 - written chapter-number parsing and special-section hints
 - release-noise normalization with recorded transformations
@@ -39,7 +42,7 @@ See [ROADMAP.md](ROADMAP.md) for the implementation map, [docs/MATCHING.md](docs
 - Dockerfile plus a TrueNAS Compose example
 - read-only media mount by default, with a separate opt-in writer service
 
-Provider search for genuinely unidentified books, persistent proposal state, and the review UI are still being built. The filesystem executor exists now so that future approved plans have a safe transaction boundary rather than adding rollback after the fact.
+Persistent proposal state and the review UI are still being built. Provider results remain evidence only; they do not authorize writes.
 
 ## Development usage
 
@@ -48,45 +51,48 @@ Requires Python 3.11+.
 ```bash
 python -m pip install -e .
 media-janitor scan /path/to/media
-media-janitor scan /path/to/media --json snapshot.json --pretty
-media-janitor analyze-audiobooks /path/to/audiobooks
-media-janitor analyze-audiobooks /path/to/audiobooks --json analysis.json --pretty
-media-janitor inspect-audiobooks /path/to/audiobooks
 media-janitor inspect-audiobooks /path/to/audiobooks --json items.json --pretty
 ```
 
-`inspect-audiobooks` is the preferred first read-only command for real-library testing. It groups tracks into likely audiobook items, reads embedded tags when possible, records metadata-read failures without aborting the scan, and emits identity hints plus evidence/warnings. It does not generate or apply filesystem changes.
+`inspect-audiobooks` is the preferred first command for real-library testing. It groups tracks into likely audiobook items, reads embedded tags where possible, records metadata failures without aborting the scan, and emits item-level evidence/warnings without making changes.
 
-## Audiobookshelf read-only inventory and matching
+## Audiobookshelf read-only inventory and current-server matching
 
-Create an Audiobookshelf API key for an account that can read the target library, then set it through the environment rather than putting the secret on the command line:
+Configure the server through environment variables rather than putting credentials on the command line:
 
 ```bash
 export AUDIOBOOKSHELF_URL='http://your-audiobookshelf-host:13378'
 export AUDIOBOOKSHELF_API_KEY='your-api-key'
 
 media-janitor audiobookshelf-inventory --json audiobookshelf.json --pretty
+media-janitor match-audiobookshelf /path/to/audiobooks --json matches.json --pretty
 ```
 
-If the server has more than one book library, pass the library ID explicitly:
+If the server has more than one book library, pass `--library-id`.
+
+`match-audiobookshelf` scans the local tree, reads current Audiobookshelf items, and ranks current-server candidates with explicit score contributions. Results are labeled `strong_candidate`, `ambiguous`, or `no_candidate`. Close runner-ups prevent a strong label, and multiple local folders cannot silently become strong assignments to the same Audiobookshelf item.
+
+## Read-only provider identification
+
+For items not already strongly matched to current Audiobookshelf state:
 
 ```bash
-media-janitor audiobookshelf-inventory --library-id lib_xxxxxxxxx --json audiobookshelf.json --pretty
-```
-
-The inventory command only performs GET requests. It normalizes the existing Audiobookshelf title, author, narrator, series, ASIN, ISBN, duration, and path data for comparison with the filesystem inspection report. `AUDIOBOOKSHELF_TOKEN` is accepted as a legacy fallback, but API keys are preferred.
-
-To perform that comparison in one read-only command:
-
-```bash
-media-janitor match-audiobookshelf /path/to/audiobooks \
-  --json matches.json \
+media-janitor identify-audiobooks /path/to/audiobooks \
+  --provider audible \
+  --max-provider-searches 10 \
+  --json identify.json \
   --pretty
 ```
 
-`match-audiobookshelf` scans and inspects the local tree, fetches the selected Audiobookshelf library, and produces ranked candidates with explicit score contributions. Results are labeled `strong_candidate`, `ambiguous`, or `no_candidate`. A close runner-up prevents a strong label, and if multiple local folders strongly target the same Audiobookshelf item they are downgraded to `ambiguous` for manual review.
+The command discovers the providers exposed by the Audiobookshelf server, validates the selected slug, and searches only unresolved local items. `audible` is the default because audiobook-specific results can provide ASIN, narrator, duration, series, language, and abridged state. Other server-supported providers can be selected explicitly.
 
-This is still an observation step. It does not call provider matching endpoints, change Audiobookshelf metadata, trigger a library scan, generate a cleanup plan, or write to the media tree.
+Provider results report `identity_score` separately from `edition_score`. A result can therefore be a strong book identity without claiming that it is the same audiobook edition. Missing or weak edition evidence is surfaced as a warning.
+
+Provider search is capped at 10 unresolved items per run by default. Increase `--max-provider-searches` deliberately after inspecting initial results.
+
+All inventory, matching, and identification commands are observation-only. They do not rename files, update Audiobookshelf metadata, trigger library scans, approve candidates, or create executable cleanup plans.
+
+## Guarded filesystem writes
 
 A plan can be checked without writes:
 
@@ -107,9 +113,7 @@ media-janitor rollback /state/journals/PLAN_ID.json \
   --confirm-rollback
 ```
 
-The current write executor targets Linux/TrueNAS so it can require `renameat2(RENAME_NOREPLACE)` rather than fall back to an overwrite-capable rename. Read-only scan/analyze/inspect/match commands remain portable.
-
-The executor intentionally supports only operations with a defined rollback. Same-filesystem rename/move and directory creation are enabled; metadata writes, cross-filesystem copy/delete, and other destructive operations remain disabled until they have an equally strong recovery design.
+The current write executor targets Linux/TrueNAS so it can require `renameat2(RENAME_NOREPLACE)` rather than fall back to an overwrite-capable rename. It intentionally supports only operations with a defined rollback. Same-filesystem rename/move and directory creation are enabled; metadata writes, cross-filesystem copy/delete, and other destructive operations remain disabled.
 
 Run the tests with:
 
