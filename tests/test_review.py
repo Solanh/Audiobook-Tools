@@ -131,7 +131,7 @@ class ReviewServerTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 403)
             self.assertEqual(store.get_proposal(proposal.proposal_id).status, "pending")
 
-    def test_access_token_can_establish_http_only_browser_cookie(self) -> None:
+    def test_access_token_is_exchanged_for_ephemeral_http_only_browser_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store, _ = self._store_with_proposal(Path(temp_dir))
             token = "review-token-0123456789abcdef"
@@ -140,16 +140,44 @@ class ReviewServerTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as caught:
                 urlopen(base_url + "/", timeout=2)
             self.assertEqual(caught.exception.code, 401)
+            login_html = caught.exception.read().decode("utf-8")
+            self.assertIn("Review queue login", login_html)
 
             jar = http.cookiejar.CookieJar()
             opener = build_opener(HTTPCookieProcessor(jar))
-            with opener.open(base_url + "/?token=" + token, timeout=2) as response:
-                html = response.read().decode("utf-8")
-            self.assertIn("Pending proposals", html)
-            self.assertTrue(any(cookie.name == "media_janitor_review" for cookie in jar))
+            login_body = urlencode({"token": token}).encode("utf-8")
+            login_request = Request(
+                base_url + "/login",
+                data=login_body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with opener.open(login_request, timeout=2) as response:
+                queue_html = response.read().decode("utf-8")
+            self.assertIn("Pending proposals", queue_html)
+
+            session_cookies = [cookie for cookie in jar if cookie.name == "media_janitor_review_session"]
+            self.assertEqual(len(session_cookies), 1)
+            self.assertNotEqual(session_cookies[0].value, token)
 
             with opener.open(base_url + "/", timeout=2) as response:
                 self.assertEqual(response.status, 200)
+
+    def test_wrong_login_token_does_not_establish_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store, _ = self._store_with_proposal(Path(temp_dir))
+            base_url = self._start_server(store, access_token="review-token-0123456789abcdef")
+            body = urlencode({"token": "wrong-token-0123456789"}).encode("utf-8")
+            request = Request(
+                base_url + "/login",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(request, timeout=2)
+            self.assertEqual(caught.exception.code, 401)
+            self.assertIn("Invalid review token", caught.exception.read().decode("utf-8"))
 
     def test_non_loopback_exposure_requires_strong_access_token(self) -> None:
         with self.assertRaisesRegex(ValueError, "access token is required"):
@@ -166,6 +194,7 @@ class ReviewServerTests(unittest.TestCase):
             with urlopen(base_url + "/health", timeout=2) as response:
                 payload = response.read().decode("utf-8")
             self.assertIn('"status": "ok"', payload)
+            self.assertNotIn("database", payload)
 
 
 if __name__ == "__main__":
