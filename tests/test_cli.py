@@ -30,6 +30,28 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["records"][0]["chapter_hint"]["number"], 31)
             self.assertIn("Warbreaker", payload["records"][0]["normalized_name"])
 
+    def test_inspect_audiobooks_survives_invalid_audio_and_stays_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            book = root / "Warbreaker"
+            book.mkdir()
+            source = book / "Chapter One.mp3"
+            source.write_bytes(b"not-real-audio")
+            output = root / "items.json"
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                result = main(["inspect-audiobooks", str(root), "--json", str(output), "--pretty"])
+
+            self.assertEqual(result, 0)
+            self.assertTrue(source.exists())
+            self.assertEqual(source.read_bytes(), b"not-real-audio")
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertEqual(payload["items"][0]["item_path"], "Warbreaker")
+            self.assertEqual(payload["items"][0]["title_hint"], "Warbreaker")
+            self.assertIsNotNone(payload["items"][0]["files"][0]["metadata_error"])
+
 
 if __name__ == "__main__":
     unittest.main()
