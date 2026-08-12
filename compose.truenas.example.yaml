@@ -40,6 +40,16 @@ services:
     volumes:
       # The review UI intentionally receives no /media mount at all.
       - /mnt/tank/apps/media-janitor:/state:rw
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
 
   media-janitor-writer:
     <<: *media-janitor-common
