@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Sequence
@@ -14,6 +15,7 @@ from .journal import JournalError, load_journal
 from .matching import match_audiobook_items
 from .models import MediaKind, Plan
 from .provider_matching import rank_provider_results
+from .review import serve_review_queue
 from .scanner import scan_library
 from .state import FINAL_PROPOSAL_STATUSES, PROPOSAL_STATUSES, StateError, StateStore, state_database_path
 
@@ -21,7 +23,7 @@ from .state import FINAL_PROPOSAL_STATUSES, PROPOSAL_STATUSES, StateError, State
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="media-janitor",
-        description="Inspect, plan, and safely apply reversible media-library cleanup operations.",
+        description="Inspect, review, plan, and safely apply reversible media-library cleanup operations.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -149,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--limit", type=int, default=100, help="Maximum events to return (default: 100)")
     audit_list.add_argument("--json", dest="json_path", type=Path, help="Write audit events to JSON")
     audit_list.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+
+    review_server = subparsers.add_parser(
+        "review-server",
+        help="Serve a local web review queue backed by SQLite review state; never writes media",
+    )
+    review_server.add_argument("--state-dir", type=Path, default=Path("/state"), help="State directory (default: /state)")
+    review_server.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    review_server.add_argument("--port", type=int, default=8090, help="HTTP port (default: 8090)")
+    review_server.add_argument(
+        "--access-token",
+        help="Review access token. Prefer MEDIA_JANITOR_REVIEW_TOKEN so the token does not appear in shell history.",
+    )
 
     validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
     validate.add_argument("plan", type=Path, help="Plan JSON file")
@@ -523,6 +537,30 @@ def run_audit_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_review_server(args: argparse.Namespace) -> int:
+    token = (args.access_token or os.environ.get("MEDIA_JANITOR_REVIEW_TOKEN", "")).strip() or None
+    print(
+        json.dumps(
+            {
+                "status": "starting",
+                "bind": args.bind,
+                "port": args.port,
+                "state_database": str(state_database_path(args.state_dir)),
+                "access_token_required": token is not None,
+                "write_boundary": "review-state-only",
+            },
+            indent=2,
+        )
+    )
+    serve_review_queue(
+        args.state_dir,
+        bind=args.bind,
+        port=args.port,
+        access_token=token,
+    )
+    return 0
+
+
 def run_validate_plan(args: argparse.Namespace) -> int:
     plan = _load_plan(args.plan)
     validate_plan(plan)
@@ -578,6 +616,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_proposal_decide(args)
         if args.command == "audit-list":
             return run_audit_list(args)
+        if args.command == "review-server":
+            return run_review_server(args)
         if args.command == "validate-plan":
             return run_validate_plan(args)
         if args.command == "apply-plan":
