@@ -1,10 +1,10 @@
-Warbreaker
+.git
+.github
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
-.env
 state/
 .media-janitor/
 *.journal.json

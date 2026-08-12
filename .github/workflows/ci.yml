@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: python -m pip install -e .
+
+      - name: Compile package and tests
+        run: python -m compileall -q src tests
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  docker:
+    name: Docker and Compose
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t media-janitor:ci .
+
+      - name: Smoke test image
+        run: docker run --rm media-janitor:ci --help
+
+      - name: Tag image for Compose example
+        run: docker tag media-janitor:ci media-janitor:local
+
+      - name: Validate Compose configuration
+        run: docker compose -f compose.truenas.example.yaml --profile write config >/dev/null
+
+      - name: Prepare TrueNAS-style host paths
+        run: |
+          sudo mkdir -p /mnt/tank/media /mnt/tank/apps/media-janitor
+          printf 'book' | sudo tee /mnt/tank/media/before.m4b >/dev/null
+          sudo tee /mnt/tank/apps/media-janitor/plan.json >/dev/null <<'JSON'
+          {
+            "schema_version": 1,
+            "root": "/media",
+            "operations": [
+              {
+                "operation_id": "ci-rename",
+                "kind": "rename",
+                "source": "before.m4b",
+                "destination": "after.m4b",
+                "reason": "CI reversible container smoke test"
+              }
+            ]
+          }
+          JSON
+          sudo chown -R 10001:10001 /mnt/tank/media /mnt/tank/apps/media-janitor
+
+      - name: Apply plan through writer container
+        run: |
+          docker compose -f compose.truenas.example.yaml --profile write run --rm --no-deps \
+            media-janitor-writer apply-plan /state/plan.json --state-dir /state --confirm-apply
+          test ! -e /mnt/tank/media/before.m4b
+          test -f /mnt/tank/media/after.m4b
+          test "$(cat /mnt/tank/media/after.m4b)" = "book"
+
+      - name: Roll back through writer container
+        run: |
+          journal="$(find /mnt/tank/apps/media-janitor/journals -type f -name '*.json' -print -quit)"
+          test -n "$journal"
+          journal_name="$(basename "$journal")"
+          docker compose -f compose.truenas.example.yaml --profile write run --rm --no-deps \
+            media-janitor-writer rollback "/state/journals/$journal_name" --confirm-rollback
+          test -f /mnt/tank/media/before.m4b
+          test ! -e /mnt/tank/media/after.m4b
+          test "$(cat /mnt/tank/media/before.m4b)" = "book"
