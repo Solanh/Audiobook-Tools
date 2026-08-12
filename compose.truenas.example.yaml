@@ -27,6 +27,20 @@ services:
       - /mnt/tank/media:/media:ro
       - /mnt/tank/apps/media-janitor:/state:rw
 
+  media-janitor-review:
+    <<: *media-janitor-common
+    profiles: ["review"]
+    restart: unless-stopped
+    command: ["review-server", "--state-dir", "/state", "--bind", "0.0.0.0", "--port", "8090"]
+    environment:
+      # The review server refuses non-loopback exposure when this is empty or too short.
+      MEDIA_JANITOR_REVIEW_TOKEN: ${MEDIA_JANITOR_REVIEW_TOKEN:-}
+    ports:
+      - "${MEDIA_JANITOR_REVIEW_PORT:-8090}:8090"
+    volumes:
+      # The review UI intentionally receives no /media mount at all.
+      - /mnt/tank/apps/media-janitor:/state:rw
+
   media-janitor-writer:
     <<: *media-janitor-common
     profiles: ["write"]
