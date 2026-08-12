@@ -10,16 +10,12 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .state import FINAL_PROPOSAL_STATUSES, PROPOSAL_STATUSES, ProposalRecord, StateError, StateStore
 
-_COOKIE_NAME = "media_janitor_review"
+_COOKIE_NAME = "media_janitor_review_session"
 _MAX_FORM_BYTES = 16 * 1024
-
-
-class ReviewServerError(RuntimeError):
-    pass
 
 
 def _is_loopback_bind(bind: str) -> bool:
@@ -89,7 +85,10 @@ def _candidate_view(proposal: ProposalRecord) -> dict[str, Any]:
     }
 
 
-def _page(title: str, body: str) -> bytes:
+def _page(title: str, body: str, *, show_nav: bool = True) -> bytes:
+    nav = ""
+    if show_nav:
+        nav = '<nav><a href="/">Queue</a><a href="/?status=approved">Approved</a><a href="/?status=rejected">Rejected</a><a href="/?status=ignored">Ignored</a></nav>'
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -108,7 +107,8 @@ nav a {{ margin-right:12px; }}
 .warning {{ border-left:4px solid currentColor; padding-left:12px; margin:10px 0; }}
 .actions {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }}
 button {{ padding:8px 14px; cursor:pointer; }}
-textarea {{ width:100%; min-height:72px; box-sizing:border-box; }}
+input[type=password], textarea {{ width:100%; box-sizing:border-box; padding:8px; }}
+textarea {{ min-height:72px; }}
 pre {{ overflow:auto; white-space:pre-wrap; word-break:break-word; border:1px solid #8885; padding:12px; border-radius:8px; }}
 table {{ border-collapse:collapse; width:100%; }}
 th, td {{ text-align:left; border-bottom:1px solid #8884; padding:8px; vertical-align:top; }}
@@ -116,11 +116,29 @@ th, td {{ text-align:left; border-bottom:1px solid #8884; padding:8px; vertical-
 </style>
 </head>
 <body>
-<header><div><h1>Media Janitor</h1><p class="meta">Review state only — no media or Audiobookshelf writes</p></div><nav><a href="/">Queue</a><a href="/?status=approved">Approved</a><a href="/?status=rejected">Rejected</a><a href="/?status=ignored">Ignored</a></nav></header>
+<header><div><h1>Media Janitor</h1><p class="meta">Review state only — no media or Audiobookshelf writes</p></div>{nav}</header>
 {body}
 </body>
 </html>"""
     return document.encode("utf-8")
+
+
+def _render_login(*, invalid: bool = False) -> bytes:
+    warning = '<p class="warning">Invalid review token.</p>' if invalid else ""
+    return _page(
+        "Review login",
+        f"""<div class="card">
+<h2>Review queue login</h2>
+{warning}
+<p>Enter the review token configured on the server. The token is exchanged for an ephemeral browser session and is not stored in the cookie.</p>
+<form method="post" action="/login">
+<label for="token">Review token</label>
+<input id="token" name="token" type="password" autocomplete="current-password" required>
+<div class="actions"><button type="submit">Open review queue</button></div>
+</form>
+</div>""",
+        show_nav=False,
+    )
 
 
 def _render_queue(store: StateStore, status: str) -> bytes:
@@ -211,12 +229,12 @@ def create_review_server(
     store.initialize()
     csrf_token = secrets.token_urlsafe(32)
     token = access_token or None
+    browser_session = secrets.token_urlsafe(32) if token else None
 
     class ReviewHandler(BaseHTTPRequestHandler):
         server_version = "MediaJanitorReview/0.1"
 
         def log_message(self, format: str, *args: object) -> None:
-            # Avoid logging query strings, which may contain the one-time access token.
             return
 
         def _security_headers(self) -> None:
@@ -255,7 +273,27 @@ def create_review_server(
             self.end_headers()
             self.wfile.write(payload)
 
-        def _cookie_token(self) -> str | None:
+        def _read_form(self) -> dict[str, list[str]] | None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_text("Invalid content length", HTTPStatus.BAD_REQUEST)
+                return None
+            if length <= 0 or length > _MAX_FORM_BYTES:
+                self._send_text("Invalid form size", HTTPStatus.BAD_REQUEST)
+                return None
+            content_type = self.headers.get("Content-Type", "")
+            if not content_type.startswith("application/x-www-form-urlencoded"):
+                self._send_text("Unsupported content type", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                return None
+            try:
+                raw = self.rfile.read(length).decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                self._send_text("Invalid UTF-8 form body", HTTPStatus.BAD_REQUEST)
+                return None
+            return parse_qs(raw, keep_blank_values=True)
+
+        def _cookie_session(self) -> str | None:
             raw = self.headers.get("Cookie")
             if not raw:
                 return None
@@ -270,8 +308,8 @@ def create_review_server(
         def _authorized(self) -> bool:
             if token is None:
                 return True
-            cookie_value = self._cookie_token()
-            if cookie_value and hmac.compare_digest(cookie_value, token):
+            cookie_value = self._cookie_session()
+            if cookie_value and browser_session and hmac.compare_digest(cookie_value, browser_session):
                 return True
             authorization = self.headers.get("Authorization", "")
             if authorization.startswith("Bearer "):
@@ -280,43 +318,39 @@ def create_review_server(
                     return True
             return False
 
-        def _consume_query_token(self) -> bool:
-            if token is None:
-                return False
-            parsed = urlsplit(self.path)
-            query = parse_qs(parsed.query)
-            supplied = query.get("token", [""])[0]
-            if not supplied or not hmac.compare_digest(supplied, token):
-                return False
-            cleaned_query = {key: value for key, value in query.items() if key != "token"}
-            location = parsed.path
-            if cleaned_query:
-                location += "?" + urlencode(cleaned_query, doseq=True)
-            self.send_response(HTTPStatus.SEE_OTHER)
-            self._security_headers()
-            self.send_header("Location", location or "/")
-            self.send_header(
-                "Set-Cookie",
-                f"{_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict",
-            )
-            self.end_headers()
-            return True
-
         def _require_auth(self) -> bool:
             if self._authorized():
                 return True
-            self._send_text(
-                "Review access token required. Open the review URL with ?token=<token> once to establish a browser cookie.",
-                HTTPStatus.UNAUTHORIZED,
-            )
+            self._send_html(_render_login(), HTTPStatus.UNAUTHORIZED)
             return False
+
+        def _handle_login(self) -> None:
+            if token is None or browser_session is None:
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self._security_headers()
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
+            form = self._read_form()
+            if form is None:
+                return
+            supplied = form.get("token", [""])[0]
+            if not supplied or not hmac.compare_digest(supplied, token):
+                self._send_html(_render_login(invalid=True), HTTPStatus.UNAUTHORIZED)
+                return
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self._security_headers()
+            self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                f"{_COOKIE_NAME}={browser_session}; Path=/; HttpOnly; SameSite=Strict",
+            )
+            self.end_headers()
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
             if parsed.path == "/health":
-                self._send_json({"status": "ok", "database": str(store.path)})
-                return
-            if self._consume_query_token():
+                self._send_json({"status": "ok"})
                 return
             if not self._require_auth():
                 return
@@ -349,9 +383,13 @@ def create_review_server(
             self._send_text("Not found", HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
+            parsed = urlsplit(self.path)
+            if parsed.path == "/login":
+                self._handle_login()
+                return
             if not self._require_auth():
                 return
-            parsed = urlsplit(self.path)
+
             prefix = "/proposal/"
             suffix = "/decision"
             if not (parsed.path.startswith(prefix) and parsed.path.endswith(suffix)):
@@ -363,21 +401,9 @@ def create_review_server(
                 self._send_text("Not found", HTTPStatus.NOT_FOUND)
                 return
 
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                self._send_text("Invalid content length", HTTPStatus.BAD_REQUEST)
+            form = self._read_form()
+            if form is None:
                 return
-            if length <= 0 or length > _MAX_FORM_BYTES:
-                self._send_text("Invalid form size", HTTPStatus.BAD_REQUEST)
-                return
-            content_type = self.headers.get("Content-Type", "")
-            if not content_type.startswith("application/x-www-form-urlencoded"):
-                self._send_text("Unsupported content type", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
-                return
-
-            raw = self.rfile.read(length).decode("utf-8", errors="strict")
-            form = parse_qs(raw, keep_blank_values=True)
             supplied_csrf = form.get("csrf", [""])[0]
             if not supplied_csrf or not hmac.compare_digest(supplied_csrf, csrf_token):
                 self._send_text("Invalid CSRF token", HTTPStatus.FORBIDDEN)
