@@ -15,6 +15,7 @@ from media_janitor.audiobookshelf import (
     ProviderBookResult,
 )
 from media_janitor.cli import main
+from media_janitor.items import AudiobookItemAnalysis
 
 
 class FakeIdentifyClient:
@@ -36,11 +37,11 @@ class FakeIdentifyClient:
                 library_id="lib_1",
                 path="/audiobooks/Warbreaker",
                 title="Warbreaker",
-                authors=(),
+                authors=("Brandon Sanderson",),
                 narrators=(),
                 series=(),
                 duration_seconds=None,
-                asin=None,
+                asin="MATCHASIN",
                 isbn=None,
             ),
         )
@@ -123,18 +124,34 @@ class IdentifyCliTests(unittest.TestCase):
             source = self._build_tagless_book(root)
             output = root / "identify.json"
             client = FakeIdentifyClient(strong_existing_match=True)
+            strong_local = AudiobookItemAnalysis(
+                item_path="Warbreaker",
+                files=(),
+                title_hint="Warbreaker",
+                author_hints=("Brandon Sanderson",),
+                narrator_hints=(),
+                series_hint=None,
+                series_index_hint=None,
+                asin="MATCHASIN",
+                isbn=None,
+                total_duration_seconds=None,
+                confidence=0.95,
+                evidence=("synthetic test identity",),
+                warnings=(),
+            )
 
             with patch("media_janitor.cli.client_from_environment", return_value=client):
-                with redirect_stdout(StringIO()):
-                    result = main(
-                        [
-                            "identify-audiobooks",
-                            str(root),
-                            "--json",
-                            str(output),
-                            "--pretty",
-                        ]
-                    )
+                with patch("media_janitor.cli.analyze_audiobook_items", return_value=(strong_local,)):
+                    with redirect_stdout(StringIO()):
+                        result = main(
+                            [
+                                "identify-audiobooks",
+                                str(root),
+                                "--json",
+                                str(output),
+                                "--pretty",
+                            ]
+                        )
 
             self.assertEqual(result, 0)
             self.assertTrue(source.exists())
