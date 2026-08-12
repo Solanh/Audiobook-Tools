@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import PurePosixPath
 from typing import Any, Iterable
@@ -45,6 +46,7 @@ class AudiobookMatchResult:
     status: str
     candidates: tuple[AudiobookMatchCandidate, ...]
     margin: float | None
+    warnings: tuple[str, ...] = ()
 
     @property
     def best(self) -> AudiobookMatchCandidate | None:
@@ -54,6 +56,7 @@ class AudiobookMatchResult:
         return {
             "status": self.status,
             "margin": self.margin,
+            "warnings": list(self.warnings),
             "local_item": self.local_item.to_dict(),
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
@@ -65,10 +68,6 @@ def _fold_text(value: str | None) -> str:
     decomposed = unicodedata.normalize("NFKD", value.casefold())
     asciiish = "".join(character for character in decomposed if not unicodedata.combining(character))
     return " ".join(re.findall(r"[a-z0-9]+", asciiish))
-
-
-def _tokens(value: str | None) -> set[str]:
-    return set(_fold_text(value).split())
 
 
 def text_similarity(left: str | None, right: str | None) -> float:
@@ -275,9 +274,9 @@ def match_audiobook_item(
     if not candidates:
         return AudiobookMatchResult(local_item=local, status="no_candidate", candidates=(), margin=None)
 
-    best = candidates[0]
-    second_score = candidates[1].score if len(candidates) > 1 else 0.0
-    margin = round(best.score - second_score, 3) if len(candidates) > 1 else None
+    best = ranked[0]
+    second_score = ranked[1].score if len(ranked) > 1 else None
+    margin = round(best.score - second_score, 3) if second_score is not None else None
     identifier_match = any(
         entry.field in {"asin", "isbn"} and entry.contribution >= 0.50
         for entry in best.evidence
@@ -287,7 +286,7 @@ def match_audiobook_item(
         status = "strong_candidate"
     elif identifier_match and best.score >= 0.55 and (margin is None or margin >= 0.08):
         status = "strong_candidate"
-    elif best.score >= 0.45:
+    elif best.score >= 0.35:
         status = "ambiguous"
     else:
         status = "no_candidate"
@@ -307,7 +306,28 @@ def match_audiobook_items(
     candidate_limit: int = 3,
 ) -> tuple[AudiobookMatchResult, ...]:
     server_values = tuple(server_items)
-    return tuple(
+    results = [
         match_audiobook_item(local, server_values, candidate_limit=candidate_limit)
         for local in local_items
-    )
+    ]
+
+    strong_by_server_id: dict[str, list[int]] = defaultdict(list)
+    for index, result in enumerate(results):
+        if result.status == "strong_candidate" and result.best is not None:
+            strong_by_server_id[result.best.item.id].append(index)
+
+    for server_id, indices in strong_by_server_id.items():
+        if len(indices) < 2:
+            continue
+        warning = (
+            f"Audiobookshelf item {server_id} is the strong candidate for multiple local items; "
+            "manual review is required"
+        )
+        for index in indices:
+            results[index] = replace(
+                results[index],
+                status="ambiguous",
+                warnings=results[index].warnings + (warning,),
+            )
+
+    return tuple(results)
