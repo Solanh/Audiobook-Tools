@@ -8,6 +8,7 @@ from typing import Sequence
 
 from .audiobook import extract_chapter_hint, normalize_search_text
 from .executor import ExecutionError, apply_plan, rollback_journal, validate_plan
+from .items import analyze_audiobook_items
 from .journal import JournalError, load_journal
 from .models import MediaKind, Plan
 from .scanner import scan_library
@@ -38,6 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Number of interesting filename analyses to print (default: 20)",
+    )
+
+    inspect = subparsers.add_parser(
+        "inspect-audiobooks",
+        help="Build a read-only item-level report from folders, filenames, and embedded tags",
+    )
+    inspect.add_argument("path", type=Path, help="Audiobook library or dataset root")
+    inspect.add_argument("--json", dest="json_path", type=Path, help="Write the complete item report to JSON")
+    inspect.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+    inspect.add_argument(
+        "--show",
+        type=int,
+        default=20,
+        help="Number of item summaries to print (default: 20)",
     )
 
     validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
@@ -164,6 +179,49 @@ def run_audiobook_analysis(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_audiobook_inspection(args: argparse.Namespace) -> int:
+    snapshot = scan_library(args.path)
+    items = analyze_audiobook_items(args.path, snapshot=snapshot)
+    audiobook_files = sum(len(item.files) for item in items)
+    files_with_metadata = sum(1 for item in items for file in item.files if file.embedded is not None)
+    items_with_warnings = sum(1 for item in items if item.warnings)
+
+    print(
+        json.dumps(
+            {
+                "root": snapshot.root,
+                "items": len(items),
+                "audiobook_files": audiobook_files,
+                "files_with_embedded_metadata": files_with_metadata,
+                "items_with_warnings": items_with_warnings,
+                "unreadable_paths": len(snapshot.unreadable_paths),
+            },
+            indent=2,
+        )
+    )
+
+    for item in items[: max(args.show, 0)]:
+        author = f" | {item.author_hints[0]}" if item.author_hints else ""
+        warning = f" | {len(item.warnings)} warning(s)" if item.warnings else ""
+        title = item.title_hint or "unknown title"
+        print(f"{item.item_path} -> {title}{author} | confidence {item.confidence:.3f}{warning}")
+
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        indent = 2 if args.pretty else None
+        payload = {
+            "schema_version": 1,
+            "created_at": snapshot.created_at,
+            "root": snapshot.root,
+            "items": [item.to_dict() for item in items],
+            "unreadable_paths": list(snapshot.unreadable_paths),
+        }
+        args.json_path.write_text(json.dumps(payload, indent=indent) + "\n", encoding="utf-8")
+        print(f"inspection: {args.json_path}")
+
+    return 0
+
+
 def run_validate_plan(args: argparse.Namespace) -> int:
     plan = _load_plan(args.plan)
     validate_plan(plan)
@@ -223,6 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_scan(args)
         if args.command == "analyze-audiobooks":
             return run_audiobook_analysis(args)
+        if args.command == "inspect-audiobooks":
+            return run_audiobook_inspection(args)
         if args.command == "validate-plan":
             return run_validate_plan(args)
         if args.command == "apply-plan":
