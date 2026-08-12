@@ -88,6 +88,7 @@ class StateStoreTests(unittest.TestCase):
                 proposal_id="proposal-1",
             )
             self.assertEqual(proposal.status, "pending")
+            self.assertEqual(len(proposal.candidate_sha256), 64)
 
             duplicate = store.stage_proposal(
                 "report-1",
@@ -96,6 +97,13 @@ class StateStoreTests(unittest.TestCase):
                 proposal_id="ignored-new-id",
             )
             self.assertEqual(duplicate.proposal_id, "proposal-1")
+
+            with self.assertRaisesRegex(StateError, "different content"):
+                store.stage_proposal(
+                    "report-1",
+                    "Warbreaker",
+                    {"provider": "google", "identity_score": 0.3},
+                )
 
             decided = store.decide_proposal("proposal-1", "approved", note="reviewed metadata only")
             self.assertEqual(decided.status, "approved")
@@ -106,6 +114,21 @@ class StateStoreTests(unittest.TestCase):
 
             events = store.list_audit_events(entity_type="proposal", entity_id="proposal-1")
             self.assertEqual([event.event_type for event in reversed(events)], ["proposal_staged", "proposal_decided"])
+
+    def test_proposal_integrity_check_detects_candidate_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = StateStore.from_state_dir(temp_dir)
+            report = store.save_report("identify-audiobooks", {"records": []})
+            proposal = store.stage_proposal(report.report_id, "Book", {"title": "Original"})
+
+            with sqlite3.connect(store.path) as connection:
+                connection.execute(
+                    "UPDATE proposals SET candidate_json = ? WHERE proposal_id = ?",
+                    ('{"title":"Tampered"}', proposal.proposal_id),
+                )
+
+            with self.assertRaisesRegex(StateError, "integrity verification"):
+                store.get_proposal(proposal.proposal_id)
 
     def test_cannot_stage_proposal_from_missing_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
