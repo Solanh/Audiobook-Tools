@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .audiobook import extract_chapter_hint, normalize_search_text
+from .audiobookshelf import AudiobookshelfError, client_from_environment
 from .executor import ExecutionError, apply_plan, rollback_journal, validate_plan
 from .items import analyze_audiobook_items
 from .journal import JournalError, load_journal
@@ -53,6 +54,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Number of item summaries to print (default: 20)",
+    )
+
+    abs_inventory = subparsers.add_parser(
+        "audiobookshelf-inventory",
+        help="Read Audiobookshelf library metadata without modifying the server",
+    )
+    abs_inventory.add_argument(
+        "--library-id",
+        help="Audiobookshelf library id; auto-selects when exactly one book library is available",
+    )
+    abs_inventory.add_argument("--json", dest="json_path", type=Path, help="Write normalized library items to JSON")
+    abs_inventory.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+    abs_inventory.add_argument(
+        "--show",
+        type=int,
+        default=20,
+        help="Number of Audiobookshelf item summaries to print (default: 20)",
     )
 
     validate = subparsers.add_parser("validate-plan", help="Validate a cleanup plan without writing anything")
@@ -222,6 +240,59 @@ def run_audiobook_inspection(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_audiobookshelf_inventory(args: argparse.Namespace) -> int:
+    client = client_from_environment()
+    libraries = client.libraries()
+
+    selected = None
+    if args.library_id:
+        selected = next((library for library in libraries if library.id == args.library_id), None)
+        if selected is None:
+            known = ", ".join(library.id for library in libraries) or "none"
+            raise ValueError(f"Audiobookshelf library id {args.library_id!r} was not found; available: {known}")
+    else:
+        book_libraries = [library for library in libraries if library.media_type == "book"]
+        if len(book_libraries) == 1:
+            selected = book_libraries[0]
+        elif len(libraries) == 1:
+            selected = libraries[0]
+        else:
+            choices = ", ".join(f"{library.id} ({library.name})" for library in book_libraries or libraries)
+            raise ValueError(f"Multiple Audiobookshelf libraries are available; pass --library-id. Choices: {choices}")
+
+    items = client.library_items(selected.id)
+    print(
+        json.dumps(
+            {
+                "server": client.base_url,
+                "library": selected.to_dict(),
+                "items": len(items),
+            },
+            indent=2,
+        )
+    )
+
+    for item in items[: max(args.show, 0)]:
+        author = f" | {item.authors[0]}" if item.authors else ""
+        title = item.title or "unknown title"
+        path = f" | {item.path}" if item.path else ""
+        print(f"{item.id} -> {title}{author}{path}")
+
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        indent = 2 if args.pretty else None
+        payload = {
+            "schema_version": 1,
+            "server": client.base_url,
+            "library": selected.to_dict(),
+            "items": [item.to_dict() for item in items],
+        }
+        args.json_path.write_text(json.dumps(payload, indent=indent) + "\n", encoding="utf-8")
+        print(f"audiobookshelf inventory: {args.json_path}")
+
+    return 0
+
+
 def run_validate_plan(args: argparse.Namespace) -> int:
     plan = _load_plan(args.plan)
     validate_plan(plan)
@@ -283,6 +354,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_audiobook_analysis(args)
         if args.command == "inspect-audiobooks":
             return run_audiobook_inspection(args)
+        if args.command == "audiobookshelf-inventory":
+            return run_audiobookshelf_inventory(args)
         if args.command == "validate-plan":
             return run_validate_plan(args)
         if args.command == "apply-plan":
@@ -291,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_rollback(args)
         if args.command == "journal-status":
             return run_journal_status(args)
-    except (ExecutionError, JournalError, OSError, ValueError) as error:
+    except (AudiobookshelfError, ExecutionError, JournalError, OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")
 
     parser.error(f"Unknown command: {args.command}")
