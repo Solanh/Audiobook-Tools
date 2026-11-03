@@ -61,7 +61,9 @@ jobs:
         run: docker tag media-janitor:ci media-janitor:local
 
       - name: Validate Compose configuration
-        run: docker compose -f compose.truenas.example.yaml --profile write config >/dev/null
+        env:
+          MEDIA_JANITOR_REVIEW_TOKEN: ci-review-token-0123456789abcdef
+        run: docker compose -f compose.truenas.example.yaml --profile write --profile review config >/dev/null
 
       - name: Prepare TrueNAS-style host paths
         run: |
@@ -102,3 +104,40 @@ jobs:
           test -f /mnt/tank/media/before.m4b
           test ! -e /mnt/tank/media/after.m4b
           test "$(cat /mnt/tank/media/before.m4b)" = "book"
+
+      - name: Initialize review state through container
+        env:
+          MEDIA_JANITOR_REVIEW_TOKEN: ci-review-token-0123456789abcdef
+        run: |
+          docker compose -f compose.truenas.example.yaml --profile review run --rm --no-deps \
+            media-janitor-review state-init --state-dir /state
+          test -f /mnt/tank/apps/media-janitor/media-janitor.sqlite3
+
+      - name: Start isolated review service
+        env:
+          MEDIA_JANITOR_REVIEW_TOKEN: ci-review-token-0123456789abcdef
+        run: |
+          docker compose -f compose.truenas.example.yaml --profile review up -d media-janitor-review
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8090/health >/tmp/review-health.json; then
+              break
+            fi
+            sleep 0.5
+          done
+          grep -q '"status": "ok"' /tmp/review-health.json
+
+          code="$(curl -sS -o /tmp/review-login.html -w '%{http_code}' http://127.0.0.1:8090/)"
+          test "$code" = "401"
+          grep -q 'Review queue login' /tmp/review-login.html
+
+          container_id="$(docker compose -f compose.truenas.example.yaml --profile review ps -q media-janitor-review)"
+          test -n "$container_id"
+          docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container_id" >/tmp/review-mounts.txt
+          grep -qx '/state' /tmp/review-mounts.txt
+          ! grep -qx '/media' /tmp/review-mounts.txt
+
+      - name: Stop review service
+        if: always()
+        env:
+          MEDIA_JANITOR_REVIEW_TOKEN: ci-review-token-0123456789abcdef
+        run: docker compose -f compose.truenas.example.yaml --profile review down --remove-orphans

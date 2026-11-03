@@ -2,11 +2,11 @@
 
 Media Janitor stores durable review state in SQLite separately from the media library.
 
-For the TrueNAS Compose example, the intended layout is:
+The intended layout is:
 
 ```text
-/media   read-only during observation/review
-/state   writable persistent application state
+/media   media dataset
+/state   writable persistent application/review state
 ```
 
 The database path is:
@@ -15,7 +15,7 @@ The database path is:
 /state/media-janitor.sqlite3
 ```
 
-Do not put the state directory inside the media root. `identify-audiobooks --state-dir ...` refuses that layout.
+Do not put `/state` inside the media root. Identification with persistent state refuses that layout.
 
 ## Initialize and inspect state
 
@@ -24,7 +24,7 @@ media-janitor state-init --state-dir /state
 media-janitor state-status --state-dir /state
 ```
 
-The database currently stores:
+The database stores:
 
 - immutable observation/identification reports;
 - staged review proposals;
@@ -44,7 +44,7 @@ media-janitor identify-audiobooks /media \
 
 Supplying `--state-dir` persists the observation report. It does not create review proposals unless explicitly requested.
 
-## Stage strong identity candidates for review
+## Stage strong identity candidates
 
 ```bash
 media-janitor identify-audiobooks /media \
@@ -52,36 +52,17 @@ media-janitor identify-audiobooks /media \
   --stage-strong-proposals
 ```
 
-Only provider results labeled `strong_identity_candidate` are staged automatically, and every staged record starts with status `pending`.
+Only provider results labeled `strong_identity_candidate` are staged automatically, and every staged record starts as `pending`.
 
-Staging does **not**:
+Staging does **not** approve candidates, rename/move files, update embedded tags, change Audiobookshelf metadata, generate a filesystem plan, or invoke the writer.
 
-- approve the candidate;
-- rename or move files;
-- update embedded tags;
-- change Audiobookshelf metadata;
-- generate a filesystem plan;
-- invoke the writer container.
-
-The proposal stores the selected provider candidate plus the full provider/current-server evidence that led to it.
-
-## Review proposals
+## Review from the CLI
 
 ```bash
 media-janitor proposal-list --state-dir /state --status pending
 ```
 
-For machine-readable output:
-
-```bash
-media-janitor proposal-list \
-  --state-dir /state \
-  --status pending \
-  --json /state/pending-proposals.json \
-  --pretty
-```
-
-## Record a decision
+Record one final decision:
 
 ```bash
 media-janitor proposal-decide PROPOSAL_ID \
@@ -90,17 +71,25 @@ media-janitor proposal-decide PROPOSAL_ID \
   --note 'Reviewed title, author, narrator, duration, and ASIN'
 ```
 
-Allowed final decisions are:
+Allowed final decisions are `approved`, `rejected`, and `ignored`.
 
-- `approved`
-- `rejected`
-- `ignored`
+A final decision is immutable in the current schema. Changed evidence should create a new report/proposal instead of rewriting old review history.
 
-A final decision is immutable in the current schema. If the evidence later changes, a future identification report should create a new proposal rather than silently rewriting the history of the old one.
+## Review from the local web UI
 
-Most importantly, `approved` currently means **approved in review state only**. There is intentionally no code path from `proposal-decide` to `apply-plan` or to an Audiobookshelf write endpoint yet.
+The same proposals can be reviewed through the built-in web queue:
 
-That bridge should only be added after reviewed proposal-to-plan generation has its own stale-source checks and verification tests.
+```bash
+media-janitor review-server --state-dir /state
+```
+
+Open `http://127.0.0.1:8090`.
+
+The web UI uses the same `StateStore.decide_proposal` path as the CLI, so both interfaces produce the same SQLite status changes and audit events. The UI displays provider/current-server evidence, identity and edition scores, identifiers, warnings, and the candidate digest before presenting approve/reject/ignore actions.
+
+For network access, see [REVIEW_UI.md](REVIEW_UI.md). Non-loopback binding requires a review token and the TrueNAS review container has no media mount.
+
+Most importantly, `approved` still means **approved in review state only**. Neither the CLI nor web UI has a code path to `apply-plan` or to an Audiobookshelf write endpoint.
 
 ## Audit trail
 
@@ -117,13 +106,7 @@ media-janitor audit-list \
   --entity-id PROPOSAL_ID
 ```
 
-Current audit events include:
-
-- `report_saved`
-- `proposal_staged`
-- `proposal_decided`
-
-Decision events include the candidate digest so the decision remains tied to the candidate content that was reviewed.
+Current audit events include `report_saved`, `proposal_staged`, and `proposal_decided`. Decision events include the candidate digest so the decision remains tied to the exact candidate content that was reviewed.
 
 ## SQLite durability choices
 
@@ -135,6 +118,6 @@ The state store currently enables:
 - explicit schema-version checking;
 - immutable report IDs;
 - one proposal per local item per source report;
-- content integrity checks on reports and proposal candidates.
+- content-integrity checks on reports and proposal candidates.
 
 The SQLite database is application/review state, not a replacement for the separate filesystem rollback journal or a TrueNAS/ZFS snapshot.
